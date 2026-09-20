@@ -1,0 +1,35 @@
+{
+  "name": "@geastack/vite-plugin-apple-native",
+  "version": "0.1.3",
+  "description": "Vite plugin that lowers Apple-native (UIKit/AppKit/MapKit/Metal) JSX into native view construction for Gea Apple targets, plus an empty-IR emitter for native-rendered apps.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/geastack/apple.git",
+    "directory": "packages/vite-plugin-apple-native"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": {
+      "import": "./index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@babel/generator": "^7.23.0",
+    "@babel/parser": "^7.23.0",
+    "@babel/traverse": "^7.23.0",
+    "@babel/types": "^7.23.0"
+  }
+}
