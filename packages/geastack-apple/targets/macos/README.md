@@ -20,14 +20,14 @@ bundle, `<app>/dist/macos/<app-id>/build/` for objects and PCHs, and
 directory the build runs in: `gea build` runs this script in the app, and a
 direct run uses the invocation directory.
 
-This package is installed into an app's `node_modules`, so a package-relative
-output path hid every build inside a directory nobody opens and npm deletes on
-the next install. Set `GEA_MACOS_OUTPUT_DIR` to put the whole tree elsewhere.
+Output does not go under the package because the package lives in the app's
+`node_modules`, which npm replaces on reinstall. Set `GEA_MACOS_OUTPUT_DIR` to
+put the whole tree elsewhere.
 
 `<app-id>` is currently any name; when no generated app is present under
 `dist/macos/.generated/<app-id>/` the build falls back to a built-in
 Phase B smoke app (`macos_smoke_app.cpp`) that exercises View / Text /
-Button / event dispatch. Real geatsc-compiled apps drop into
+Button / event dispatch. geatsc-compiled apps go into
 `dist/macos/.generated/` and supersede the smoke automatically — the
 JSX → C++ pipeline for the macOS target is a follow-up.
 
@@ -116,12 +116,12 @@ Native: View / Text / Button / Image / Canvas / VirtualList; flex
 layout; click + press events; trackpad-momentum scroll; window resize
 (live + final); standard menu bar with Cmd-Q.
 
-Audio is real: `targets/shared/apple_audio.mm` (shared with iOS) backs
+Audio: `targets/shared/apple_audio.mm` (shared with iOS) backs
 `gea::platform::audio` with AVAudioEngine — sample-accurately scheduled,
 mixed oscillators on an `AVAudioSourceNode`, plus `playFile`/`playPcm` on
 `AVAudioPlayerNode`s. `targets/shared/build-audio-selftest.sh` builds and
 runs the measurement harness (offline render, RMS + measured frequency);
-`GEA_AUDIO_CAPTURE_RAW=<path>` captures a real app run for
+`GEA_AUDIO_CAPTURE_RAW=<path>` captures an app run for
 `targets/shared/analyze-audio-capture.mjs`.
 
 Stubbed for v1: WiFi (`macos_wifi`), BLE (`macos_ble`), IMU (`macos_imu`)

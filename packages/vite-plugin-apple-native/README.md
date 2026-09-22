@@ -1,9 +1,9 @@
 # @geastack/vite-plugin-apple-native
 
-Vite build plugin for Gea **Apple-native** targets (iOS / macOS). It lowers JSX
+Vite build plugin for Gea Apple-native targets (iOS / macOS). It lowers JSX
 written against Apple framework view tags into imperative native-view
-construction, so apps render through real UIKit/AppKit/MapKit/Metal views rather
-than the gea web/embedded renderer.
+construction, so apps render through UIKit/AppKit/MapKit/Metal views instead of
+the gea web/embedded renderer.
 
 It exports two plugins:
 
