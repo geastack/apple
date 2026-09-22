@@ -42,7 +42,11 @@
 
 namespace gea::ios::renderer {
 
-UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color);
+// A style colour is an OPAQUE packed pixel — the CSS alpha rides beside it in a
+// separate style field (bg_alpha, text_alpha, border_alpha, …), because RGB565
+// has no alpha channel and the style system keeps one representation for every
+// board. Pass the matching field or translucent CSS paints solid.
+UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color, std::uint8_t alpha = 255);
 CGFloat canvasScaleForView(UIView *view);
 void dispatchSyntheticTap(UIView *rootView, CGPoint point);
 bool isScrollableNode(const gea::embedded::ui::Node &node);

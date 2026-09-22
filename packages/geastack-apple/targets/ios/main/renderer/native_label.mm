@@ -124,7 +124,7 @@ void applyTextProps(GeaNativeLabel *label, const gea::embedded::ui::Node &node, 
 {
 	NSString *raw = NSStringFromText(node.text);
 	const CGFloat fontSize = std::max<CGFloat>(1.0, static_cast<CGFloat>(node.style.font_size > 0 ? node.style.font_size : 16) * scale);
-	UIColor *color = rgb565ToUIColor(node.style.text_color);
+	UIColor *color = rgb565ToUIColor(node.style.text_color, node.style.text_alpha);
 	label.geaHostedByNativeButtonTitle = [label.superview isKindOfClass:[GeaNativeButton class]];
 	label.hidden = label.geaHostedByNativeButtonTitle;
 	label.textAlignment = textAlignmentForStyle(node.style.text_align);
