@@ -274,12 +274,13 @@ NSLineBreakMode lineBreakModeForText(NSString *text, NSFont *font, CGFloat maxWi
 // Host text-measurement hook for the AppKit renderer. The Thermalright target
 // has no AppKit text renderer; it wants the framework's generated-font metrics.
 #if !GEA_MACOS_THERMALRIGHT_DISPLAY_TARGET
-extern "C" bool gea_host_measure_text(const char *text,
-                                      int maxWidth,
-                                      int fontId,
-                                      int fontSize,
-                                      int *outWidth,
-                                      int *outHeight)
+extern "C" bool gea_host_measure_text_with_line_height(const char *text,
+                                                       int maxWidth,
+                                                       int fontId,
+                                                       int fontSize,
+                                                       int lineHeight,
+                                                       int *outWidth,
+                                                       int *outHeight)
 {
 	if (!outWidth || !outHeight) return false;
 	if (!text || !text[0]) {
@@ -304,6 +305,8 @@ extern "C" bool gea_host_measure_text(const char *text,
 	key.append(std::to_string(fontId));
 	key.push_back('\x1f');
 	key.append(std::to_string(fontSize));
+	key.push_back('\x1f');
+	key.append(std::to_string(lineHeight));
 	{
 		std::scoped_lock guard(measureLock);
 		auto it = measureCache.find(key);
@@ -320,6 +323,15 @@ extern "C" bool gea_host_measure_text(const char *text,
 	const CGFloat boundedMax = maxWidth > 0 ? maxWidth : CGFLOAT_MAX;
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	paragraph.lineBreakMode = gea::macos::lineBreakModeForText(str, font, boundedMax);
+	// CSS `line-height` sets the LINE BOX height, which is what the engine stacks
+	// text rows with. Without it AppKit reports the font's own default leading and
+	// every text node measures taller than the stylesheet says — weather's hour
+	// cells came out 46% too tall and overflowed the forecast box. Pinning min ==
+	// max makes the cell report lines * lineHeight, which is the CSS box.
+	if (lineHeight > 0) {
+		paragraph.minimumLineHeight = lineHeight;
+		paragraph.maximumLineHeight = lineHeight;
+	}
 	NSDictionary *attrs = @{
 		NSFontAttributeName: font,
 		NSParagraphStyleAttributeName: paragraph,
