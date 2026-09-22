@@ -2,11 +2,26 @@
 
 Build a gea-embedded JSX app as a native UIKit app.
 
-First milestone:
+From an app that depends on `@geastack/apple` (every iOS example does, and
+`gea create --targets ios` adds it), the CLI drives this target:
 
 ```bash
-targets/ios/build-ios.sh bouncing-balls-jsx simulator
+npx gea build --target ios                 # simulator .app, no launch
+npx gea build --target ios --mode device   # unsigned iphoneos .app
+npx gea run --target ios                   # build, install and launch on a simulator
+npx gea run --target ios --mode device     # build, sign, install and launch on an iPhone
 ```
+
+The same script can be run directly from the app folder; the CLI passes the
+app id and destination through unchanged:
+
+```bash
+node_modules/@geastack/apple/targets/ios/build-ios.sh <app-id> simulator
+```
+
+The script resolves `@geastack/core`, `@geastack/compiler`, the apple-native
+geatsc plugin and `@geastack/cli` by walking up `node_modules` from the app
+folder, so it works on a hoisted npm install and on a linked checkout alike.
 
 The simulator path auto-picks an available iPhone simulator. Set
 `GEA_IOS_SIMULATOR_UDID` to force a specific device. By default, the script
@@ -18,7 +33,7 @@ team when it can find one. You can also set your Apple development team
 explicitly:
 
 ```bash
-GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 targets/ios/build-ios.sh bouncing-balls-jsx device
+GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 npx gea run --target ios --mode device
 ```
 
 To see the automatically detected team id:
@@ -37,7 +52,7 @@ To only verify that the app compiles for the iPhone device SDK, skip launch
 without a development team:
 
 ```bash
-GEA_IOS_SKIP_LAUNCH=1 targets/ios/build-ios.sh bouncing-balls-jsx device
+npx gea build --target ios --mode device
 ```
 
 The Xcode project is generated under

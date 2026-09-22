@@ -23,19 +23,20 @@ The build scripts run in the directory of the app you are building, which is
 where npm installed this package. From an app that depends on `@geastack/apple`:
 
 ```sh
-node_modules/@geastack/apple/targets/ios/build-ios.sh <app-id> simulator
+npx gea build --target ios            # or: node_modules/@geastack/apple/targets/ios/build-ios.sh <app-id> simulator
+npx gea run --target ios              # build, then install and launch on an iPhone simulator
 ```
 
 Build a signed device app:
 
 ```sh
-GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 node_modules/@geastack/apple/targets/ios/build-ios.sh <app-id> device
+GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 npx gea run --target ios --mode device
 ```
 
 Build a macOS app:
 
 ```sh
-node_modules/@geastack/apple/targets/macos/build-macos.sh <app-id>
+npx gea build --target macos          # or: node_modules/@geastack/apple/targets/macos/build-macos.sh <app-id>
 open dist/macos/<app-id>/<AppName>.app
 ```
 

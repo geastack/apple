@@ -104,9 +104,6 @@ require_source "$ROOT/targets/ios/main/renderer/view_reconciler.mm" \
 require_framework_source "$GEA_CORE/include/graphics/font.h" \
   "lookupFontFamilyName" \
   "the framework font registry should expose font-family names for native host renderers"
-require_source "$ROOT/targets/ios/generate-resident-registry.mjs" \
-  "lookup_font_family_name" \
-  "iOS resident registry generation should forward font-family names"
 require_source "$ROOT/targets/ios/main/renderer/view_reconciler.mm" \
   "syncRecursive" \
   "iOS native renderer should reconcile the full mounted tree"

@@ -40,6 +40,10 @@ if (!appId || !appName || !bundleId || !generatedDir || !projectPath) {
 }
 
 const iosDir = scriptDir  // apple/targets/ios — this script's own directory, not the apps repo
+// The framework packages are wherever build-ios.sh resolved them (the app's
+// hoisted node_modules, or a linked checkout); it exports the roots it found.
+const geaCore = process.env.GEA_CORE || ''
+if (!geaCore) fail('GEA_CORE is not set: run this generator through build-ios.sh, which resolves @geastack/core for it.')
 const plistOut = path.join(projectPath, 'Info.plist')
 let appMeta
 try {
@@ -140,25 +144,6 @@ function findFontResources() {
     .sort()
 }
 
-function findResidentSources() {
-  const residentsDir = path.join(generatedDir, 'residents')
-  if (!fs.existsSync(residentsDir)) return []
-  return fs.readdirSync(residentsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .flatMap((entry) => {
-      const dir = path.join(residentsDir, entry.name)
-      return [
-        ...readGeatscSources(dir),
-        source(path.join(dir, 'entry.cpp')),
-        source(path.join(dir, 'gea_embedded_font_generated.cpp')),
-        source(path.join(dir, 'gea_embedded_assets_generated.cpp')),
-      ].filter(existing)
-    })
-}
-
-const residentRegistry = source(path.join(generatedDir, 'resident_registry.cpp'))
-const hasResidentRegistry = existing(residentRegistry)
-const residentSources = hasResidentRegistry ? [residentRegistry, ...findResidentSources()] : []
 const appleNativeBridgeSource = source(path.join(generatedDir, 'gea/apple/native_bridge.mm'), 'sourcecode.cpp.objcpp')
 const generatedProgramSources = readGeatscSources(
   generatedDir,
@@ -194,25 +179,21 @@ const sources = [
   ...appNativeSources,
   // Framework C/C++ sources come from @geastack/core/gea_sources.sh,
   // passed by build-ios.sh via env (iOS-curated: camera kept since ios_camera.mm
-  // provides it; resident-app/OTA/diagnostics services + the single-app runtime
+  // provides it; OTA/diagnostics services + the single-app runtime
   // shell excluded — iOS uses its own UIKit run loop). Single source of truth.
   ...(process.env.GEA_FW_C_SOURCES || '').split('\n').filter(Boolean).map((f) => source(f, 'sourcecode.c.c')),
   ...(process.env.GEA_FW_CXX_SOURCES || '').split('\n').filter(Boolean).map((f) => source(f)),
-  // gea_app_entry / resident_apps are mode-specific (deliberately not in the manifest).
-  ...(hasResidentRegistry
-    ? []
-    : [
-      source(path.join(geaCore, 'gea_app_entry.cpp')),
-      source(path.join(geaCore, '../geaos/resident_apps.cpp')),
-    ]),
-  ...(hasResidentRegistry ? residentSources : generatedProgramSources),
+  // gea_app_entry.cpp provides Application::init/frame, which calls the one
+  // __gea_top_level geatsc emitted (deliberately not in the manifest).
+  source(path.join(geaCore, 'gea_app_entry.cpp')),
+  ...generatedProgramSources,
   appleNativeBridgeSource,
 ].filter(existing)
 
 const fontGenerated = source(path.join(generatedDir, 'gea_embedded_font_generated.cpp'))
-if (!hasResidentRegistry && existing(fontGenerated)) sources.push(fontGenerated)
+if (existing(fontGenerated)) sources.push(fontGenerated)
 const assetsGenerated = source(path.join(generatedDir, 'gea_embedded_assets_generated.cpp'))
-if (!hasResidentRegistry && existing(assetsGenerated)) sources.push(assetsGenerated)
+if (existing(assetsGenerated)) sources.push(assetsGenerated)
 const hasGeneratedFonts = sources.some((entry) => path.basename(entry.file) === 'gea_embedded_font_generated.cpp')
 
 const fontResources = findFontResources().map((file) => resource(file))

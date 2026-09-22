@@ -4,32 +4,84 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 IOS_DIR="$ROOT_DIR/targets/ios"
 
-# Resolve the gea framework through npm.
-GEA_CORE="$(node -e "process.stdout.write(require('fs').realpathSync('$ROOT_DIR/node_modules/@geastack/core'))" 2>/dev/null || true)"
-[ -n "$GEA_CORE" ] && [ -f "$GEA_CORE/package.json" ] || { echo "Cannot resolve @geastack/core via node_modules — run 'npm install' in $ROOT_DIR" >&2; exit 1; }
-GEA_COMPILER="$(node -e "process.stdout.write(require('fs').realpathSync('$ROOT_DIR/node_modules/@geastack/compiler'))" 2>/dev/null || true)"
-[ -n "$GEA_COMPILER" ] && [ -f "$GEA_COMPILER/package.json" ] || { echo "Cannot resolve @geastack/compiler via node_modules — run 'npm install' in $ROOT_DIR" >&2; exit 1; }
+# The project is the directory this script was started in -- `gea build
+# --target ios` spawns it with the app's own folder as cwd, and a direct run is
+# made from the app folder. Captured once, before anything can move. Every
+# nested `gea` call inherits the same cwd and resolves the same project, so
+# none carry --project.
+BUILD_INVOCATION_CWD="$(pwd -P)"
+
+# Resolve the gea framework through npm plus the shared manifest, the same way
+# build-macos.sh does. `apple` is a native npm package whose @geastack/* deps
+# npm HOISTS to the app's node_modules, one or more levels above this package,
+# while a linked checkout has them under its own. Looking one level below this
+# package -- what this script did before -- finds nothing in either installed
+# layout, so walk the node_modules chain from the app first, then from here.
+resolve_gea_package_from() {
+  node -e '
+const fs = require("node:fs")
+const path = require("node:path")
+let dir = process.argv[1]
+while (true) {
+  const candidate = path.join(dir, "node_modules", process.argv[2])
+  if (fs.existsSync(path.join(candidate, "package.json"))) {
+    process.stdout.write(fs.realpathSync(candidate))
+    break
+  }
+  const parent = path.dirname(dir)
+  if (parent === dir) break
+  dir = parent
+}
+' "$1" "$2" 2>/dev/null || true
+}
+resolve_gea_package() {
+  local start found
+  for start in "${2:-$BUILD_INVOCATION_CWD}" "${2:-$ROOT_DIR}"; do
+    found="$(resolve_gea_package_from "$start" "$1")"
+    if [[ -n "$found" ]]; then
+      printf '%s' "$found"
+      return 0
+    fi
+  done
+}
+GEA_CORE="$(resolve_gea_package @geastack/core)"
+[ -n "$GEA_CORE" ] && [ -f "$GEA_CORE/package.json" ] || { echo "Cannot resolve @geastack/core from $BUILD_INVOCATION_CWD — add @geastack/apple to the app's dependencies and run 'npm install' there" >&2; exit 1; }
+GEA_COMPILER="$(resolve_gea_package @geastack/compiler)"
+[ -n "$GEA_COMPILER" ] && [ -f "$GEA_COMPILER/package.json" ] || { echo "Cannot resolve @geastack/compiler from $BUILD_INVOCATION_CWD — add @geastack/apple to the app's dependencies and run 'npm install' there" >&2; exit 1; }
+# An app that installs @geastack/apple gets the plugin from node_modules; inside
+# this repository it is a sibling package that nothing links, so name it there.
+GEA_APPLE_NATIVE_PLUGIN="$(resolve_gea_package @geastack/geatsc-plugin-apple-native)"
+if [[ -z "$GEA_APPLE_NATIVE_PLUGIN" && -d "$ROOT_DIR/../geatsc-plugin-apple-native" ]]; then
+  GEA_APPLE_NATIVE_PLUGIN="$(cd "$ROOT_DIR/../geatsc-plugin-apple-native" && pwd)"
+fi
+[ -n "$GEA_APPLE_NATIVE_PLUGIN" ] && [ -f "$GEA_APPLE_NATIVE_PLUGIN/dist/index.js" ] || { echo "Cannot resolve @geastack/geatsc-plugin-apple-native from $BUILD_INVOCATION_CWD" >&2; exit 1; }
 GEA_HOST_DIR="${GEA_HOST_DIR:-$GEA_CORE/../host}"
 GEA_ENGINE_DIR="${GEA_ENGINE_DIR:-$GEA_CORE/../engine}"
 GEA_ELEMENTS_DIR="${GEA_ELEMENTS_DIR:-$GEA_CORE/../elements}"
 GEA_GEAOS_PACKAGE_DIR="${GEA_GEAOS_PACKAGE_DIR:-$GEA_CORE/../geaos}"
-# The project is the directory this script was started in -- `gea build` spawns
-# it with the app's own folder as cwd, and a direct run is made from the app
-# folder. Captured once, before anything can move. Every nested `gea` call
-# inherits the same cwd and resolves the same project, so none carry --project.
-BUILD_INVOCATION_CWD="$(pwd -P)"
+# The source manifest reads these from the ENVIRONMENT: gea_sources.sh is a
+# front end for gea_sources.mjs, which runs as a child process. A plain shell
+# variable never reaches it and it reports "<name> unset" while the include
+# roots come back empty.
+export GEA_CORE GEA_HOST_DIR GEA_ENGINE_DIR GEA_ELEMENTS_DIR GEA_GEAOS_PACKAGE_DIR
 # This script IS @geastack/apple, so the generator must bind against this
 # working copy rather than whatever installed copy it would resolve from the app.
 export GEA_APPLE_ROOT="$ROOT_DIR"
-GEA_CLI="${GEA_CLI_BIN:-$(node -e "process.stdout.write(require('path').join(require('fs').realpathSync('$ROOT_DIR/node_modules/@geastack/cli'), 'bin', 'gea.mjs'))" 2>/dev/null || true)}"
-[ -n "$GEA_CLI" ] && [ -f "$GEA_CLI" ] || { echo "Cannot resolve @geastack/cli via node_modules — run 'npm install' in $ROOT_DIR" >&2; exit 1; }
+# Prefer an explicit override, then the package the app installed, then gea on PATH.
+GEA_CLI="${GEA_CLI_BIN:-}"
+if [[ -z "$GEA_CLI" ]]; then
+  GEA_CLI="$(node -e 'process.stdout.write(require("path").join(process.argv[1], "bin", "gea.mjs"))' "$(resolve_gea_package @geastack/cli)" 2>/dev/null || true)"
+  if [[ ! -f "$GEA_CLI" ]]; then
+    GEA_CLI="$(command -v gea || true)"
+  fi
+fi
+[ -n "$GEA_CLI" ] && [ -f "$GEA_CLI" ] || { echo "Cannot locate GeaStack CLI — set GEA_CLI_BIN to gea.mjs, install @geastack/cli locally, or add gea to PATH" >&2; exit 1; }
 
 # Framework sources/includes from the shared manifest (iOS keeps camera — ios_camera.mm
-# provides it — but has no resident-app/OTA/diagnostics services or single-app
-# runtime shell, so exclude those). generate-xcode-project.mjs consumes these.
+# provides it — but has no OTA/diagnostics services or single-app runtime
+# shell, so exclude those). generate-xcode-project.mjs consumes these.
 # shellcheck source=/dev/null
 source "$GEA_CORE/gea_sources.sh"
-export GEA_CORE
 export GEA_FW_CXX_SOURCES="$(gea_fw_cxx_sources | grep -vE "/(runtime|services/[a-z_]+)\.cpp\$")"
 export GEA_FW_C_SOURCES="$(gea_fw_c_sources)"
 export GEA_FW_INCLUDE_DIRS="$(gea_fw_include_flags | sed "s/^-I//")"
@@ -83,7 +135,6 @@ build_font_args=(
 generate_app() {
   local app_id="$1"
   local out_dir="$2"
-  local prefix="${3:-}"
   local info
   local root
   local entry
@@ -91,7 +142,7 @@ generate_app() {
   info="$(node "$GEA_CLI" apps inspect "$app_id" --format shell)" || return 1
   IFS=$'\t' read -r root entry runtime _name <<< "$info"
   if [[ "$runtime" != "gea" ]]; then
-    echo "Skipping resident $app_id: runtime=$runtime is not supported by iOS resident build" >&2
+    echo "iOS target only supports runtime=gea apps: $app_id is runtime=$runtime" >&2
     return 1
   fi
   local args=(
@@ -103,10 +154,9 @@ generate_app() {
     # function no iOS target defines. `build-macos.sh` passes `macos` for the
     # same reason; iOS was simply never given its half.
     --apple-platform ios
-    # The plugin resolves itself from `@geastack/geatsc-plugin-apple-native`,
-    # which is not installed in this repo's node_modules -- so, as
-    # `build-macos.sh` already does, name the in-repo build directly.
-    --geatsc-apple-native-plugin "$ROOT_DIR/packages/geatsc-plugin-apple-native/dist/index.js"
+    # The plugin is resolved above the way build-macos.sh resolves it: from the
+    # app's node_modules, or the sibling package inside this repository.
+    --geatsc-apple-native-plugin "$GEA_APPLE_NATIVE_PLUGIN/dist/index.js"
     --app-dir "$root"
     --entry "$entry"
     --out-dir "$out_dir"
@@ -115,14 +165,6 @@ generate_app() {
   local native_plugin="$root/ios/geatsc-native-plugin.mjs"
   if [[ -f "$native_plugin" ]]; then
     args+=(--extra-geatsc-plugin "$native_plugin")
-  fi
-  if [[ -n "$prefix" ]]; then
-    args+=(
-      --entry-symbol "${prefix}_top_level"
-      --cpp-prelude-symbol "${prefix}_register_styles"
-      --font-symbol-prefix "$prefix"
-      --isolate-symbols
-    )
   fi
   node "$GEA_CORE/scripts/build-gea-vite-geatsc.mjs" "${args[@]}"
 }
@@ -214,33 +256,7 @@ pick_ios_device() {
   rm -f "$output_json"
 }
 
-RESIDENT_IDS=()
-if [[ "$APP_ID" == "app-launcher" && "${GEA_IOS_RESIDENT_APPS:-auto}" != "none" ]]; then
-  if [[ -n "${GEA_IOS_RESIDENT_APPS:-}" && "${GEA_IOS_RESIDENT_APPS:-}" != "auto" ]]; then
-    read -r -a RESIDENT_IDS <<< "${GEA_IOS_RESIDENT_APPS//,/ }"
-  else
-    mapfile -t RESIDENT_IDS < <(
-      node "$GEA_CLI" apps list --target esp32 | grep -vx 'direct-psram-balls' || true
-    )
-  fi
-fi
-
-if [[ ${#RESIDENT_IDS[@]} -eq 0 ]]; then
-  generate_app "$APP_ID" "$GENERATED_DIR" ""
-else
-  ACTUAL_RESIDENTS=()
-  for id in "${RESIDENT_IDS[@]}"; do
-    safe="${id//[^A-Za-z0-9_]/_}"
-    prefix="gea_resident_${safe}"
-    resident_dir="$GENERATED_DIR/residents/$id"
-    mkdir -p "$resident_dir"
-    generate_app "$id" "$resident_dir" "$prefix" || continue
-    node "$IOS_DIR/generate-resident-entry.mjs" "$prefix" "$resident_dir/entry.cpp"
-    ACTUAL_RESIDENTS+=("$id")
-  done
-  RESIDENT_IDS=("${ACTUAL_RESIDENTS[@]}")
-  node "$IOS_DIR/generate-resident-registry.mjs" "$GENERATED_DIR/resident_registry.cpp" "$APP_ID" "${RESIDENT_IDS[@]}"
-fi
+generate_app "$APP_ID" "$GENERATED_DIR"
 
 if [[ ! -f "$GENERATED_DIR/gea_runtime.cpp" ]]; then
   echo "#include \"$GEA_COMPILER/dist/targets/cpp/runtime/runtime.cpp\"" > "$GENERATED_DIR/gea_runtime.cpp"

@@ -10,7 +10,6 @@
 #include "font_registry.h"
 #include "image.h"
 #include "ios_renderer.h"
-#include "resident_apps.h"
 #include "ios_root_background.h"
 #include "pixel.h"
 #include "ui/tree_internal.h"
@@ -58,19 +57,6 @@ UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color)
 NSString *NSStringFromAttr(const char *value)
 {
 	return [NSString stringWithUTF8String:value ? value : ""] ?: @"";
-}
-
-void queueInitialResidentAppFromProcessArguments()
-{
-	if (!gea::framework::apps::ResidentApps::isEnabled()) return;
-	NSArray<NSString *> *arguments = NSProcessInfo.processInfo.arguments;
-	for (NSUInteger i = 0; i + 1 < arguments.count; ++i) {
-		if (![arguments[i] isEqualToString:@"--gea-initial-app"]) continue;
-		NSString *appId = arguments[i + 1];
-		if (appId.length > 0) gea::framework::apps::ResidentApps::requestLaunch(appId.UTF8String);
-	}
-	const char *envAppId = std::getenv("GEA_IOS_INITIAL_APP");
-	if (envAppId && envAppId[0]) gea::framework::apps::ResidentApps::requestLaunch(envAppId);
 }
 
 NSTextAlignment textAlignmentForStyle(int align)
@@ -567,48 +553,11 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 @property(nonatomic, strong) UIView *rootView;
 @property(nonatomic, strong) GeaDisplayView *displayView;
 @property(nonatomic, strong) UIView *nativeRootView;
-@property(nonatomic, strong) UIButton *launcherButton;
 @property(nonatomic, strong) CADisplayLink *displayLink;
 - (void)installNativeRootView:(UIView *)view;
 @end
 
 @implementation GeaAppDelegate
-
-- (BOOL)shouldShowLauncherButton
-{
-	if (!gea::framework::apps::ResidentApps::isEnabled()) return NO;
-	const char *activeId = gea::framework::apps::ResidentApps::activeId();
-	return activeId && std::strcmp(activeId, gea::framework::apps::AppManager::launcherAppId()) != 0;
-}
-
-- (void)syncLauncherButton
-{
-	if (!self.launcherButton || !self.rootView) return;
-	const BOOL show = [self shouldShowLauncherButton];
-	UIEdgeInsets safeInsets = self.rootView.safeAreaInsets;
-	const CGRect bounds = self.rootView.bounds;
-	const CGFloat size = 52.0;
-	const CGFloat bottomMargin = 12.0;
-	const CGFloat x = (bounds.size.width - size) * 0.5;
-	const CGFloat y = bounds.size.height - safeInsets.bottom - bottomMargin - size;
-	self.launcherButton.frame = CGRectMake(std::max<CGFloat>(safeInsets.left, x),
-	                                       std::max<CGFloat>(safeInsets.top, y),
-	                                       size,
-	                                       size);
-	self.launcherButton.layer.cornerRadius = size * 0.5;
-	self.launcherButton.hidden = !show;
-	self.launcherButton.userInteractionEnabled = show;
-	if (show) [self.rootView bringSubviewToFront:self.launcherButton];
-}
-
-- (void)returnToLauncher:(id)sender
-{
-	(void)sender;
-	if (gea::framework::apps::AppManager::returnRunningAppToLauncher("iOS launcher button")) {
-		self.launcherButton.hidden = YES;
-		self.launcherButton.userInteractionEnabled = NO;
-	}
-}
 
 - (void)layoutDisplayViewInSafeArea
 {
@@ -620,7 +569,6 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	if (frame.size.width <= 0 || frame.size.height <= 0) frame = self.rootView.bounds;
 	self.displayView.frame = frame;
 	if (self.nativeRootView) self.nativeRootView.frame = self.rootView.bounds;
-	[self syncLauncherButton];
 }
 
 - (void)installNativeRootView:(UIView *)view
@@ -636,13 +584,8 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	view.userInteractionEnabled = YES;
 	self.displayView.hidden = YES;
 	self.displayView.userInteractionEnabled = NO;
-	if (self.launcherButton.superview == self.rootView) {
-		[self.rootView insertSubview:view belowSubview:self.launcherButton];
-	} else {
-		[self.rootView addSubview:view];
-	}
+	[self.rootView addSubview:view];
 	[view setNeedsLayout];
-	[self syncLauncherButton];
 }
 
 - (CGSize)viewportSize
@@ -686,23 +629,6 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	self.displayView = [[GeaDisplayView alloc] initWithFrame:CGRectZero];
 	self.displayView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 	[self.rootView addSubview:self.displayView];
-	self.launcherButton = [UIButton buttonWithType:UIButtonTypeSystem];
-	self.launcherButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.62];
-	self.launcherButton.tintColor = UIColor.whiteColor;
-	self.launcherButton.layer.borderWidth = 1.0;
-	self.launcherButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
-	self.launcherButton.clipsToBounds = YES;
-	self.launcherButton.hidden = YES;
-	self.launcherButton.accessibilityLabel = @"App Launcher";
-	if (@available(iOS 13.0, *)) {
-		UIImage *image = [UIImage systemImageNamed:@"square.grid.2x2"];
-		[self.launcherButton setImage:image forState:UIControlStateNormal];
-	} else {
-		[self.launcherButton setTitle:@"Apps" forState:UIControlStateNormal];
-		self.launcherButton.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-	}
-	[self.launcherButton addTarget:self action:@selector(returnToLauncher:) forControlEvents:UIControlEventTouchUpInside];
-	[self.rootView addSubview:self.launcherButton];
 	controller.view = self.rootView;
 	self.window.rootViewController = controller;
 	[self.window makeKeyAndVisible];
@@ -731,7 +657,6 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	// ImageStore decodes straight to full-colour RGBA8888 native pixels (no 565
 	// quantization, no separate retained buffer) for native UIImageView.
 	gea::framework::app::Application::init(viewportWidth, viewportHeight, devicePixelRatio);
-	queueInitialResidentAppFromProcessArguments();
 	[self syncAppBackgroundColor];
 	[self tick:nil];
 
@@ -748,27 +673,8 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 - (void)tick:(CADisplayLink *)link
 {
 	(void)link;
-	{
-		char pendingId[64] = "";
-		if (gea::framework::apps::ResidentApps::consumeLaunch(pendingId, sizeof(pendingId)) &&
-		    gea::framework::apps::ResidentApps::select(pendingId)) {
-			CGSize viewport = [self viewportSize];
-			const CGFloat viewportScale = [self viewportScale];
-			self.displayView.contentScaleFactor = viewportScale;
-			const int viewportWidth = std::max(1, static_cast<int>(std::ceil(viewport.width)));
-			const int viewportHeight = std::max(1, static_cast<int>(std::ceil(viewport.height)));
-			// gea's internal CSS device-pixel-ratio stays 1 (see init above): the
-			// layout is logical points; UIKit handles retina via contentScaleFactor.
-			const int devicePixelRatio = 1;
-			gea::ios::IosRenderer::instance().teardown();
-			gea_ios_display_set_viewport_size(viewportWidth, viewportHeight);
-			gea::platform::display::Display::init();
-			gea::framework::app::Application::init(viewportWidth, viewportHeight, devicePixelRatio);
-		}
-	}
 	gea::framework::app::Application::frame(gea_embedded_now_ms());
 	[self syncAppBackgroundColor];
-	[self syncLauncherButton];
 	auto &tree = gea::embedded::ui::Tree::instance();
 	const int root = tree.mountedRoot();
 	if (!self.nativeRootView && root >= 0) {
