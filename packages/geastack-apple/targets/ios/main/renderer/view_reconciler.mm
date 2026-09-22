@@ -133,9 +133,13 @@ void applyViewStyle(UIView *view, const gea::embedded::ui::Node &node,
 	view.hidden = node.style.display == 1 || node.style.opacity == 0 || w <= 0 || h <= 0;
 	view.alpha = static_cast<CGFloat>(node.style.opacity) / 255.0;
 
-	view.backgroundColor = node.style.has_bg ? rgb565ToUIColor(node.style.bg_color) : UIColor.clearColor;
+	// view.alpha above is ELEMENT opacity and fades the subtree with it; a
+	// background's own alpha must not go through it, or the labels sitting on a
+	// translucent chip fade too. It belongs to the colour.
+	view.backgroundColor = node.style.has_bg ? rgb565ToUIColor(node.style.bg_color, node.style.bg_alpha)
+	                                         : UIColor.clearColor;
 	view.layer.borderWidth = static_cast<CGFloat>(std::max<int>(0, node.style.border_width)) * scale;
-	view.layer.borderColor = rgb565ToUIColor(node.style.border_color).CGColor;
+	view.layer.borderColor = rgb565ToUIColor(node.style.border_color, node.style.border_alpha).CGColor;
 	const int tl = std::max<int>(0, node.style.border_radius[0]);
 	const int tr = std::max<int>(0, node.style.border_radius[1]);
 	const int br = std::max<int>(0, node.style.border_radius[2]);

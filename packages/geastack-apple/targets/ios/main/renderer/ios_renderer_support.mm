@@ -14,16 +14,20 @@ extern "C" void gea_ios_touch_set_state(int touching, int x, int y);
 
 namespace gea::ios::renderer {
 
-UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color)
+UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color, std::uint8_t alpha)
 {
 	// Style colours are native pixels (RGBA8888 on iOS) — unpack the full 8-bit
 	// channels so native UIKit views render true colour, not 565-quantized.
+	//
+	// The pixel's own alpha byte is always 255: cssColorStyleValue packs rgb only,
+	// deliberately, so a colour means the same thing on a 565 board as here. The
+	// CSS alpha comes in as the `alpha` argument from the caller's style field.
 	int r, g, b, a;
 	gea::framework::graphics::pixel::unpackNative8(color, &r, &g, &b, &a);
 	return [UIColor colorWithRed:static_cast<CGFloat>(r) / 255.0
 	                       green:static_cast<CGFloat>(g) / 255.0
 	                        blue:static_cast<CGFloat>(b) / 255.0
-	                       alpha:1.0];
+	                       alpha:static_cast<CGFloat>(alpha) / 255.0];
 }
 
 CGFloat canvasScaleForView(UIView *view)

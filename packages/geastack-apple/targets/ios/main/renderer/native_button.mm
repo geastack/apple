@@ -145,7 +145,7 @@ NSAttributedString *attributedTitleForTextChild(const gea::embedded::ui::Node &t
 	NSString *raw = NSStringFromText(textNode.text);
 	const CGFloat fontSize = std::max<CGFloat>(1.0, static_cast<CGFloat>(textNode.style.font_size > 0 ? textNode.style.font_size : 16) * scale);
 	UIFont *font = gea::ios::fontForId(textNode.style.font_id, fontSize);
-	UIColor *color = rgb565ToUIColor(textNode.style.text_color);
+	UIColor *color = rgb565ToUIColor(textNode.style.text_color, textNode.style.text_alpha);
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	paragraph.alignment = textAlignmentForStyle(textNode.style.text_align);
 	paragraph.lineBreakMode = NSLineBreakByWordWrapping;

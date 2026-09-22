@@ -69,16 +69,18 @@ void registerCameraSurface();
 
 namespace {
 
-UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color)
+UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color, std::uint8_t alpha = 255)
 {
 	// Style colours are native pixels (RGBA8888 on iOS) — unpack full 8-bit
-	// channels so native UIKit views render true colour, not 565-quantized.
+	// channels so native UIKit views render true colour, not 565-quantized. The
+	// pixel's own alpha byte is always 255; the CSS alpha lives in a separate
+	// style field and arrives as `alpha` (see renderer/ios_renderer_internal.h).
 	int r, g, b, a;
 	gea::framework::graphics::pixel::unpackNative8(color, &r, &g, &b, &a);
 	return [UIColor colorWithRed:static_cast<CGFloat>(r) / 255.0
 	                       green:static_cast<CGFloat>(g) / 255.0
 	                        blue:static_cast<CGFloat>(b) / 255.0
-	                       alpha:1.0];
+	                       alpha:static_cast<CGFloat>(alpha) / 255.0];
 }
 
 NSString *NSStringFromAttr(const char *value)
@@ -364,9 +366,10 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		field.hidden = (node.style.display == 1 || node.style.opacity == 0 || w <= 0 || h <= 0);
 		field.userInteractionEnabled = !field.hidden;
 		field.alpha = static_cast<CGFloat>(node.style.opacity) / 255.0;
-		field.backgroundColor = node.style.has_bg ? rgb565ToUIColor(node.style.bg_color) : UIColor.clearColor;
+		field.backgroundColor = node.style.has_bg ? rgb565ToUIColor(node.style.bg_color, node.style.bg_alpha)
+		                                         : UIColor.clearColor;
 		field.layer.borderWidth = static_cast<CGFloat>(std::max<int>(0, node.style.border_width)) * canvasScale;
-		field.layer.borderColor = rgb565ToUIColor(node.style.border_color).CGColor;
+		field.layer.borderColor = rgb565ToUIColor(node.style.border_color, node.style.border_alpha).CGColor;
 		const int tl = std::max<int>(0, node.style.border_radius[0]);
 		const int tr = std::max<int>(0, node.style.border_radius[1]);
 		const int br = std::max<int>(0, node.style.border_radius[2]);
