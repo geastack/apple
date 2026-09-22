@@ -47,6 +47,31 @@ static void gea_macos_smoke_log(const char *message)
 	}
 }
 
+// GeaDesignWidth (Info.plist, written by build-macos.sh from the app's
+// gea.designWidth) is the logical CSS width the app's stylesheets were authored
+// against. A window is whatever size the user drags it to, so the ratio follows
+// from the two: the engine multiplies every CSS px by it (ui::cssPixelLength),
+// which scales a fixed-px layout to the window instead of pinning it to the
+// dimensions of the panel the app was drawn for. An app that declares nothing
+// keeps the build's default ratio, exactly as before.
+static double gea_macos_design_width(void)
+{
+	static const double designWidth = []() -> double {
+		id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"GeaDesignWidth"];
+		if (![value respondsToSelector:@selector(doubleValue)]) return 0.0;
+		const double parsed = [value doubleValue];
+		return parsed > 0.0 ? parsed : 0.0;
+	}();
+	return designWidth;
+}
+
+static double gea_macos_device_pixel_ratio(double viewportWidth)
+{
+	const double designWidth = gea_macos_design_width();
+	if (designWidth <= 0.0 || viewportWidth <= 0.0) return GEA_EMBEDDED_CSS_DEVICE_PIXEL_RATIO;
+	return viewportWidth / designWidth;
+}
+
 // Apple-native apps (those importing @geajs/apple/*) make geatsc emit this
 // handle-table bridge header plus Objective-C++ app modules. When present, this
 // file is built in apple-native mode: __gea_top_level (run from Application::init)
@@ -249,7 +274,8 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 		size = NSMakeSize(gea::platform::display::kWidth, gea::platform::display::kHeight);
 	}
 	gea_macos_smoke_log("[gea-macos] before Application::init");
-	gea::framework::app::Application::init(static_cast<int>(size.width), static_cast<int>(size.height));
+	gea::framework::app::Application::init(static_cast<int>(size.width), static_cast<int>(size.height),
+	                                       gea_macos_device_pixel_ratio(size.width));
 	gea_macos_smoke_log("[gea-macos] after Application::init");
 
 	// If the app's mounted root is a <glass-split>, swap the flat content view
@@ -396,7 +422,8 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 				// LaunchSurface). The scan below restarts them for the new app.
 				gea::css::AnimationEngine::instance().clear();
 				gea::framework::app::Application::init(static_cast<int>(sz.width),
-				                                       static_cast<int>(sz.height));
+				                                       static_cast<int>(sz.height),
+				                                       gea_macos_device_pixel_ratio(sz.width));
 			}
 		}
 	}
