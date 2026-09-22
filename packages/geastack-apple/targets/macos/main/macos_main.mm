@@ -493,6 +493,23 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	NSSize size = self.rootView.bounds.size;
 	const int w = static_cast<int>(size.width);
 	const int h = static_cast<int>(size.height);
+	// Republish the viewport whenever the window changes size. Forcing the root
+	// node's width/height below is not enough on its own: vw/vh lengths and
+	// @media conditions resolve against the metrics the engine holds, so without
+	// this they stay frozen at the size the window had on launch. This also
+	// re-derives the design-width ratio, which is what makes a fixed-px layout
+	// track a resize. setViewportMetrics recomputes class styles itself, so only
+	// call it when something actually moved.
+	{
+		static int lastViewportWidth = -1;
+		static int lastViewportHeight = -1;
+		if (w > 0 && h > 0 && (w != lastViewportWidth || h != lastViewportHeight)) {
+			lastViewportWidth = w;
+			lastViewportHeight = h;
+			gea::embedded::ui::Document::setPreferredMountSize(w, h);
+			gea::embedded::ui::setViewportMetrics(w, h, gea_macos_device_pixel_ratio(size.width));
+		}
+	}
 	// macOS target convention: the mounted root view fills the window. This
 	// gives apps a viewport that tracks resize without per-app code; if an
 	// app wants different sizing it puts a sized child inside the root.
