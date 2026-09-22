@@ -66,13 +66,21 @@ fs.mkdirSync(path.join(projectPath, 'project.xcworkspace'), { recursive: true })
 fs.mkdirSync(path.join(projectPath, 'xcshareddata/xcschemes'), { recursive: true })
 if (!skipAppIcon) gea(['apps', 'apple-icons', appId, '--platform', 'ios', '--assets-dir', appIconAssetsDir])
 
+// gea.designWidth is the logical CSS width the app's stylesheets were authored
+// against; ios_main.mm turns it into the device pixel ratio for this screen. It
+// rides Info.plist because it is a property of the bundled app, and each app gets
+// its own bundle.
+const designWidth = Number(appMeta.designWidth) > 0 ? Number(appMeta.designWidth) : 0
+const designWidthKeys = designWidth > 0 ? `<key>GeaDesignWidth</key><real>${designWidth}</real>` : ''
+
 const plistTemplate = fs.readFileSync(path.join(iosDir, 'Info.plist.in'), 'utf8')
 fs.writeFileSync(
   plistOut,
   plistTemplate
     .replaceAll('@APP_EXEC@', appName)
     .replaceAll('@APP_NAME@', appName)
-    .replaceAll('@BUNDLE_ID@', bundleId),
+    .replaceAll('@BUNDLE_ID@', bundleId)
+    .replaceAll('@DESIGN_WIDTH_KEYS@', designWidthKeys),
 )
 
 function id(label) {

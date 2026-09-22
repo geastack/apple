@@ -21,5 +21,6 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	@DESIGN_WIDTH_KEYS@
 </dict>
 </plist>

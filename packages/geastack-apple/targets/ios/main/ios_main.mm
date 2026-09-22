@@ -28,6 +28,31 @@
 
 namespace gea::ios { void installWifiDriver(); }
 
+// GeaDesignWidth (Info.plist, written by generate-xcode-project.mjs from the app's
+// gea.designWidth) is the logical CSS width the app's stylesheets were authored
+// against. An app that declares it gets scaled to whatever screen it lands on:
+// the engine multiplies every CSS px by the ratio (ui::cssPixelLength), so a
+// layout drawn for a 273pt-wide panel fills a 393pt iPhone instead of hugging one
+// corner of it. An app that declares nothing keeps ratio 1 — see the comment at
+// Application::init below for why that is the right default here.
+static double gea_ios_design_width(void)
+{
+	static const double designWidth = []() -> double {
+		id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"GeaDesignWidth"];
+		if (![value respondsToSelector:@selector(doubleValue)]) return 0.0;
+		const double parsed = [value doubleValue];
+		return parsed > 0.0 ? parsed : 0.0;
+	}();
+	return designWidth;
+}
+
+static double gea_ios_device_pixel_ratio(double viewportWidth)
+{
+	const double designWidth = gea_ios_design_width();
+	if (designWidth <= 0.0 || viewportWidth <= 0.0) return 1.0;
+	return viewportWidth / designWidth;
+}
+
 extern "C" int gea_embedded_now_ms(void);
 extern "C" void gea_ios_display_set_viewport_size(int width, int height);
 extern "C" const std::uint32_t *gea_ios_display_presented_pixels();
@@ -646,12 +671,17 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	// physical pixels, so fixed-px app layouts (e.g. Sky Hop's 36px tiles)
 	// rendered ~3x too dense on retina. UIKit renders the native view tree
 	// crisply at the screen's content scale factor (set above) independently, so
-	// gea's internal CSS device-pixel-ratio stays 1 — otherwise `px` lengths get
-	// an extra x scale (cssPixelLength) that unitless lengths don't, blowing up
+	// gea's internal CSS device-pixel-ratio defaults to 1 — otherwise `px` lengths
+	// get an extra x scale (cssPixelLength) that unitless lengths don't, blowing up
 	// fonts (16px/36px) relative to the unitless tile layout.
+	//
+	// An app that declares gea.designWidth opts out of that default: it says its
+	// px ARE the whole layout (no unitless lengths to fall out of step with), and
+	// asks to be scaled from its own design width to this screen's. Retina is
+	// still contentScaleFactor's job either way.
 	const int viewportWidth = std::max(1, static_cast<int>(std::ceil(viewport.width)));
 	const int viewportHeight = std::max(1, static_cast<int>(std::ceil(viewport.height)));
-	const int devicePixelRatio = 1;
+	const double devicePixelRatio = gea_ios_device_pixel_ratio(viewport.width);
 	gea_ios_display_set_viewport_size(viewportWidth, viewportHeight);
 	gea::platform::display::Display::init();
 	gea::framework::camera::registerCameraSurface();

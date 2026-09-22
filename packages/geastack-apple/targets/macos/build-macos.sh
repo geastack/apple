@@ -231,6 +231,19 @@ APP_META_CACHE_IDS=("$APP_ID")
 APP_META_CACHE_VALUES=("$APP_META")
 RESOLVED_APP_META="$APP_META"
 
+# --format shell is a fixed four-field line, so the design width comes from the
+# JSON summary. It reaches the runtime through Info.plist (see Info.plist.in):
+# the window size lives in macos.json, but this is a property of the app's
+# stylesheets, not of one window, so it belongs with the bundle metadata.
+APP_DESIGN_WIDTH="$(node "$GEA_CLI" --project "$GEA_APPS_ROOT" apps inspect "$APP_ID" --format json 2>/dev/null \
+  | node -e "let s='';process.stdin.on('data',(c)=>s+=c).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).designWidth||0))}catch{process.stdout.write('0')}})" \
+  || echo 0)"
+if [[ "$APP_DESIGN_WIDTH" != "0" ]]; then
+  DESIGN_WIDTH_KEYS="<key>GeaDesignWidth</key><real>$APP_DESIGN_WIDTH</real>"
+else
+  DESIGN_WIDTH_KEYS=""
+fi
+
 # Build output belongs to the PROJECT being built, never to this package.
 # ROOT_DIR is @geastack/apple's own directory, which for every app that
 # installs the package is inside its node_modules -- so writing the bundle,
@@ -380,6 +393,7 @@ INFO_PLIST_TMP="$BUILD_DIR/Info.plist.tmp.$$"
 sed -e "s/@APP_EXEC@/$APP_EXEC/g" \
     -e "s/@APP_ID@/$APP_ID/g" \
     -e "s/@APP_NAME@/$APP_NAME/g" \
+    -e "s|@DESIGN_WIDTH_KEYS@|$DESIGN_WIDTH_KEYS|g" \
     "$ROOT_DIR/targets/macos/Info.plist.in" > "$INFO_PLIST_TMP"
 if replace_content_stable "$APP_BUNDLE/Contents/Info.plist" "$INFO_PLIST_TMP"; then
   BUNDLE_CONTENT_CHANGED=1
