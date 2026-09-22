@@ -67,10 +67,9 @@ npm run typecheck
 ## How This Fits The Stack
 
 Apple targets consume compiled Gea apps and map Gea primitives onto native
-platform controls where possible. They are not the generic compiler, not the
-embedded hardware backend, and not the public website. This repo is the Apple
-platform adapter layer: it owns native shells, generated SDK binding surfaces,
-and Apple-specific target build scripts.
+platform controls where possible. This repo is the Apple platform adapter
+layer. It owns native shells, generated SDK binding surfaces, and
+Apple-specific target build scripts.
 
 ## License
 
