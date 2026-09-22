@@ -1185,6 +1185,26 @@ void applyViewStyle(NSView *view, const gea::embedded::ui::Node &node,
 
 	view.frame = NSMakeRect(relX, yBottom, w, h);
 
+	// CSS `line-height` sets the LINE BOX, not a clip. When it is shorter than
+	// the font's natural leading — weather's 10px/1.1 labels — the glyphs
+	// overflow the content box and still paint. An NSTextField cannot: it draws
+	// inside its frame, so a CSS-sized box sheared the tops and bottoms off
+	// every label. Give the field the extra leading it needs, centred on the box
+	// the engine allocated, so the painting surface matches CSS while the layout
+	// position does not move.
+	if (node.type == gea::embedded::ui::NodeType::Text && node.style.line_height > 0 && h > 0) {
+		NSFont *lineFont = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+		if (lineFont) {
+			const CGFloat natural = std::ceil(lineFont.ascender - lineFont.descender + lineFont.leading);
+			const int lines = std::max(1, static_cast<int>(std::lround(static_cast<double>(h) / node.style.line_height)));
+			const CGFloat needed = natural * lines;
+			if (needed > h) {
+				const CGFloat grow = needed - h;
+				view.frame = NSMakeRect(relX, yBottom - grow / 2.0, w, needed);
+			}
+		}
+	}
+
 	// `filter: blur()` needs CIFilter-backed layer filters, and NSView rebuilds
 	// its backing layer when this flag flips — so it has to be set before
 	// anything (background, mask, shape sublayers) is put on that layer.
@@ -1343,6 +1363,15 @@ void applyTextProps(NSTextField *tf, const gea::embedded::ui::Node &node)
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	const CGFloat availableWidth = node.layout.width > 0 ? node.layout.width : CGFLOAT_MAX;
 	paragraph.lineBreakMode = gea::macos::lineBreakModeForText(raw, font, availableWidth);
+	// Only ever GROWS the line box. The measurement hook pins min == max so the
+	// engine gets the CSS line box, but doing that here clips the glyphs: AppKit
+	// shrinks the drawn line to the CSS height and a descender falls outside it
+	// ("Lisbon District, PT" lost its bottom row of pixels). CSS does the
+	// opposite — a line-height under the font's natural leading lets the glyphs
+	// overflow the line box and still paint — so drawing keeps the natural line
+	// and the cell centres its ink in whatever box layout allocated.
+	if (font && node.style.line_height > 0 && node.style.line_height > font.ascender - font.descender)
+		paragraph.minimumLineHeight = node.style.line_height;
 	NSMutableDictionary *attrs = textAttributes(font ?: [NSFont systemFontOfSize:node.style.font_size > 0 ? node.style.font_size : 12],
 	                                            color,
 	                                            node.style.text_decoration);
