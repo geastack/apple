@@ -44,9 +44,20 @@ resolve_gea_package() {
     fi
   done
 }
-GEA_CORE="$(resolve_gea_package @geastack/core)"
+# apple/packages/geastack-apple -> the collection root that holds core/ compiler/ cli/.
+# Inside a collection checkout the framework packages are siblings and nothing
+# links them into a node_modules anywhere above this one, so the walk above finds
+# nothing; an app that depends on @geastack/apple resolves them normally and never
+# reaches these fallbacks. build-macos.sh does the same.
+COLLECTION_ROOT="$(cd "$ROOT_DIR/../../.." 2>/dev/null && pwd || true)"
+resolve_collection_package() {
+  local resolved="$1" candidate="$COLLECTION_ROOT/$2"
+  if [[ -n "$resolved" ]]; then printf '%s' "$resolved"; return; fi
+  if [[ -f "$candidate/package.json" ]]; then (cd "$candidate" && pwd); fi
+}
+GEA_CORE="$(resolve_collection_package "$(resolve_gea_package @geastack/core)" core/packages/core)"
 [ -n "$GEA_CORE" ] && [ -f "$GEA_CORE/package.json" ] || { echo "Cannot resolve @geastack/core from $BUILD_INVOCATION_CWD — add @geastack/apple to the app's dependencies and run 'npm install' there" >&2; exit 1; }
-GEA_COMPILER="$(resolve_gea_package @geastack/compiler)"
+GEA_COMPILER="$(resolve_collection_package "$(resolve_gea_package @geastack/compiler)" compiler)"
 [ -n "$GEA_COMPILER" ] && [ -f "$GEA_COMPILER/package.json" ] || { echo "Cannot resolve @geastack/compiler from $BUILD_INVOCATION_CWD — add @geastack/apple to the app's dependencies and run 'npm install' there" >&2; exit 1; }
 # An app that installs @geastack/apple gets the plugin from node_modules; inside
 # this repository it is a sibling package that nothing links, so name it there.
@@ -70,7 +81,7 @@ export GEA_APPLE_ROOT="$ROOT_DIR"
 # Prefer an explicit override, then the package the app installed, then gea on PATH.
 GEA_CLI="${GEA_CLI_BIN:-}"
 if [[ -z "$GEA_CLI" ]]; then
-  GEA_CLI="$(node -e 'process.stdout.write(require("path").join(process.argv[1], "bin", "gea.mjs"))' "$(resolve_gea_package @geastack/cli)" 2>/dev/null || true)"
+  GEA_CLI="$(node -e 'process.stdout.write(require("path").join(process.argv[1], "bin", "gea.mjs"))' "$(resolve_collection_package "$(resolve_gea_package @geastack/cli)" cli)" 2>/dev/null || true)"
   if [[ ! -f "$GEA_CLI" ]]; then
     GEA_CLI="$(command -v gea || true)"
   fi
