@@ -90,12 +90,17 @@ UIFont *fontForId(int fontId, CGFloat sizePt)
 
 }  // namespace gea::ios
 
-extern "C" bool gea_host_measure_text(const char *text,
-                                      int maxWidth,
-                                      int fontId,
-                                      int fontSize,
-                                      int *outWidth,
-                                      int *outHeight)
+// The engine prefers this over the line-height-less variant, so one
+// implementation covers both: CSS `line-height` is the LINE BOX height the
+// engine stacks rows with, and UIKit otherwise reports the font's own leading —
+// every text node then measures taller than the stylesheet says.
+extern "C" bool gea_host_measure_text_with_line_height(const char *text,
+                                                       int maxWidth,
+                                                       int fontId,
+                                                       int fontSize,
+                                                       int lineHeight,
+                                                       int *outWidth,
+                                                       int *outHeight)
 {
 	if (!outWidth || !outHeight || fontId < 0) return false;
 	if (!text || !text[0]) {
@@ -111,6 +116,10 @@ extern "C" bool gea_host_measure_text(const char *text,
 		NSString *str = [NSString stringWithUTF8String:text] ?: @"";
 		NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 		paragraph.lineBreakMode = NSLineBreakByWordWrapping;
+		if (lineHeight > 0) {
+			paragraph.minimumLineHeight = lineHeight;
+			paragraph.maximumLineHeight = lineHeight;
+		}
 		NSDictionary *attrs = @{
 			NSFontAttributeName: font,
 			NSParagraphStyleAttributeName: paragraph,
