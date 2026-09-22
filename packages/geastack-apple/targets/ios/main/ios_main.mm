@@ -12,6 +12,8 @@
 #include "ios_renderer.h"
 #include "ios_root_background.h"
 #include "pixel.h"
+#include "ui/document.h"
+#include "ui/style.h"
 #include "ui/tree_internal.h"
 
 #include <algorithm>
@@ -712,6 +714,24 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 - (void)tick:(CADisplayLink *)link
 {
 	(void)link;
+	// Republish the viewport whenever it changes. Application::init publishes it
+	// once at launch and nothing did afterwards, so vw/vh lengths and @media
+	// conditions stayed frozen at the launch size — rotation, a split view or a
+	// safe-area change reflowed nothing. macOS does the same from its frame loop.
+	// setViewportMetrics recomputes class styles, so only call it on a real change.
+	{
+		const CGSize viewport = [self viewportSize];
+		const int vw = std::max(1, static_cast<int>(std::ceil(viewport.width)));
+		const int vh = std::max(1, static_cast<int>(std::ceil(viewport.height)));
+		static int lastViewportWidth = -1;
+		static int lastViewportHeight = -1;
+		if (vw != lastViewportWidth || vh != lastViewportHeight) {
+			lastViewportWidth = vw;
+			lastViewportHeight = vh;
+			gea::embedded::ui::Document::setPreferredMountSize(vw, vh);
+			gea::embedded::ui::setViewportMetrics(vw, vh, gea_ios_device_pixel_ratio(viewport.width));
+		}
+	}
 	gea::framework::app::Application::frame(gea_embedded_now_ms());
 	[self syncAppBackgroundColor];
 	auto &tree = gea::embedded::ui::Tree::instance();

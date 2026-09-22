@@ -5,12 +5,15 @@
 #include "image_bridge.h"
 
 #include "ui/tree_internal.h"
+#include "ui/style.h"
 
 #import <objc/runtime.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 namespace gea::ios::renderer {
 namespace {
@@ -245,6 +248,42 @@ void syncRecursive(int nodeId, UIView *parent, int parentAbsX, int parentAbsY, C
 
 }  // namespace
 
+// GEA_IOS_LAYOUT_DUMP=1 prints what the engine computed next to what this file
+// turned it into, which is the only way to tell a layout bug from a reconciler
+// bug without a debugger. macOS has had the same thing (GEA_MACOS_LAYOUT_DUMP);
+// iOS had no introspection at all. First few frames, then every 60th, so a
+// "correct on frame 1, wrong on frame 2" pattern is visible.
+void dumpLayout(UIView *parentForRoot, int rootNodeId)
+{
+	using namespace gea::embedded::ui;
+	Tree &tree = Tree::instance();
+	static int dumpFrame = 0;
+	++dumpFrame;
+	if (dumpFrame > 5 && dumpFrame % 60 != 0) return;
+
+	NSLog(@"[gea-layout] frame=%d root=%d host=%@ dpr=%.3f", dumpFrame, rootNodeId,
+	      NSStringFromCGRect(parentForRoot.bounds), devicePixelRatio());
+	for (int i = 0; i < tree.nodeCount(); i++) {
+		const auto &n = tree.node(i);
+		const std::string cls = tree.className(i);
+		NSLog(@"  node[%d] parent=%d t=%d class=\"%s\" xy=(%d,%d) wh=(%dx%d) pad=(%d,%d,%d,%d) maxwh=(%d,%d) disp=%d%s",
+		      i, static_cast<int>(n.parent), static_cast<int>(n.type), cls.c_str(),
+		      static_cast<int>(n.layout.x), static_cast<int>(n.layout.y),
+		      static_cast<int>(n.layout.width), static_cast<int>(n.layout.height),
+		      static_cast<int>(n.style.padding[0]), static_cast<int>(n.style.padding[1]),
+		      static_cast<int>(n.style.padding[2]), static_cast<int>(n.style.padding[3]),
+		      static_cast<int>(n.style.max_width), static_cast<int>(n.style.max_height),
+		      static_cast<int>(n.style.display),
+		      n.type == NodeType::Text && !n.text.empty() ? n.text.c_str() : "");
+	}
+	for (NSNumber *key in [nodeIdToView() allKeys]) {
+		UIView *view = nodeIdToView()[key];
+		NSLog(@"  view[%@] %@ frame=%@ hidden=%d alpha=%.2f clip=%d", key,
+		      NSStringFromClass([view class]), NSStringFromCGRect(view.frame),
+		      view.hidden ? 1 : 0, view.alpha, view.clipsToBounds ? 1 : 0);
+	}
+}
+
 void syncNativeTree(UIView *parentForRoot, int rootNodeId)
 {
 	using namespace gea::embedded::ui;
@@ -254,6 +293,7 @@ void syncNativeTree(UIView *parentForRoot, int rootNodeId)
 	NSMutableSet<NSNumber *> *unseen = [NSMutableSet setWithArray:[nodeIdToView() allKeys]];
 	const CGFloat scale = canvasScaleForView(parentForRoot);
 	syncRecursive(rootNodeId, parentForRoot, 0, 0, scale, unseen);
+	if (std::getenv("GEA_IOS_LAYOUT_DUMP")) dumpLayout(parentForRoot, rootNodeId);
 
 	for (NSNumber *gone in unseen) {
 		UIView *view = nodeIdToView()[gone];
