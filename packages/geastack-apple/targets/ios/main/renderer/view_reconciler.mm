@@ -278,9 +278,16 @@ void dumpLayout(UIView *parentForRoot, int rootNodeId)
 	}
 	for (NSNumber *key in [nodeIdToView() allKeys]) {
 		UIView *view = nodeIdToView()[key];
-		NSLog(@"  view[%@] %@ frame=%@ hidden=%d alpha=%.2f clip=%d", key,
+		NSString *scroll = @"";
+		if ([view isKindOfClass:[GeaNativeScrollContainer class]]) {
+			GeaNativeScrollContainer *sc = (GeaNativeScrollContainer *)view;
+			scroll = [NSString stringWithFormat:@" axis=%s content=%@ offset=%.1f/%.1f",
+			          sc.horizontal ? "x" : "y", NSStringFromCGSize(sc.contentSize),
+			          [sc geaRawOffset], [sc geaMaxOffset]];
+		}
+		NSLog(@"  view[%@] %@ frame=%@ hidden=%d alpha=%.2f clip=%d%@", key,
 		      NSStringFromClass([view class]), NSStringFromCGRect(view.frame),
-		      view.hidden ? 1 : 0, view.alpha, view.clipsToBounds ? 1 : 0);
+		      view.hidden ? 1 : 0, view.alpha, view.clipsToBounds ? 1 : 0, scroll);
 	}
 }
 

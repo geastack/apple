@@ -65,11 +65,27 @@ void dispatchSyntheticTap(UIView *rootView, CGPoint point)
 	fireTouch(gea::framework::events::TouchPhase::Up, false);
 }
 
+// A horizontally scrolling box — `overflow-x: auto/scroll` with content wider
+// than the box. These used to fall through to a plain UIView, which still got
+// clipsToBounds from the overflow style, so the rail was a dead clipped box:
+// weather's city chips and its hour and day rails could not be scrolled at all.
+bool isHorizontallyScrollableNode(const gea::embedded::ui::Node &node)
+{
+	using gea::embedded::ui::NodeType;
+	if (node.type == NodeType::VirtualList) return false;  // vertical by construction
+	// Same shape the engine itself uses (see absolute_leaf_refresh.cpp): the
+	// aggregate gates, the per-axis field says which way.
+	return node.style.overflow == 2 && gea::embedded::ui::scrollsOverflowX(node.style) &&
+	       node.layout.scroll_content_width > node.layout.width;
+}
+
 bool isScrollableNode(const gea::embedded::ui::Node &node)
 {
 	using gea::embedded::ui::NodeType;
 	if (node.type == NodeType::VirtualList) return node.layout.scroll_content_height > node.layout.height;
-	return node.style.overflow == 2 && node.layout.scroll_content_height > node.layout.height;
+	if (isHorizontallyScrollableNode(node)) return true;
+	return node.style.overflow == 2 && gea::embedded::ui::scrollsOverflowY(node.style) &&
+	       node.layout.scroll_content_height > node.layout.height;
 }
 
 NSMutableDictionary<NSNumber *, UIView *> *nodeIdToView()
