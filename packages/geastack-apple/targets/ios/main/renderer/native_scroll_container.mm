@@ -142,13 +142,17 @@ bool rectNearlyEqual(CGRect a, CGRect b)
 - (void)updateScrollTelemetryWithScale:(CGFloat)scale
 {
 	if (self.nodeId < 0) return;
-	const CGFloat rawY = self.contentOffset.y;
+	// Reported along the scrolling axis — the names stay Y-flavoured because the
+	// vertical case is the common one, but a horizontal rail reports its own axis
+	// rather than a constant 0.
+	const CGFloat rawY = [self geaRawOffset];
 	if (rawY < self.minObservedContentOffsetY) self.minObservedContentOffsetY = rawY;
 	if (rawY > self.maxObservedContentOffsetY) self.maxObservedContentOffsetY = rawY;
 
 	auto &tree = gea::embedded::ui::Tree::instance();
-	const int treeY = self.nodeId < tree.nodeCount() ? tree.scrollTop(self.nodeId) : 0;
-	const CGFloat maxY = std::max<CGFloat>(0, self.contentSize.height - self.bounds.size.height);
+	const int treeY = self.nodeId >= tree.nodeCount() ? 0
+	                  : (self.horizontal ? tree.scrollLeft(self.nodeId) : tree.scrollTop(self.nodeId));
+	const CGFloat maxY = [self geaMaxOffset];
 	const CGFloat overTop = std::min<CGFloat>(0, rawY);
 	const CGFloat overBottom = std::max<CGFloat>(0, rawY - maxY);
 	const CGFloat visualContentY = self.contentView.frame.origin.y - rawY;
@@ -169,24 +173,37 @@ bool rectNearlyEqual(CGRect a, CGRect b)
 	}
 }
 
+- (CGFloat)geaMaxOffset
+{
+	return self.horizontal ? std::max<CGFloat>(0, self.contentSize.width - self.bounds.size.width)
+	                       : std::max<CGFloat>(0, self.contentSize.height - self.bounds.size.height);
+}
+
+- (CGFloat)geaRawOffset
+{
+	return self.horizontal ? self.contentOffset.x : self.contentOffset.y;
+}
+
 - (void)commitNativeScrollTopWithScale:(CGFloat)scale
 {
 	if (self.nodeId < 0) return;
 	auto &tree = gea::embedded::ui::Tree::instance();
 	if (self.nodeId >= tree.nodeCount()) return;
 
-	const CGFloat maxOffset = std::max<CGFloat>(0, self.contentSize.height - self.bounds.size.height);
-	const CGFloat rawOffset = self.contentOffset.y;
+	const CGFloat maxOffset = [self geaMaxOffset];
+	const CGFloat rawOffset = [self geaRawOffset];
 	if (rawOffset < -0.5 || rawOffset > maxOffset + 0.5) {
 		[self updateScrollTelemetryWithScale:scale];
 		return;
 	}
 
 	const CGFloat logicalOffset = std::clamp(rawOffset, static_cast<CGFloat>(0), maxOffset);
-	const int before = tree.scrollTop(self.nodeId);
 	const int next = static_cast<int>(std::lround(logicalOffset / std::max<CGFloat>(scale, 0.0001)));
-	tree.setScrollTop(self.nodeId, next);
-	if (tree.scrollTop(self.nodeId) != before && tree.mountedRoot() >= 0) {
+	const int before = self.horizontal ? tree.scrollLeft(self.nodeId) : tree.scrollTop(self.nodeId);
+	if (self.horizontal) tree.setScrollLeft(self.nodeId, next);
+	else tree.setScrollTop(self.nodeId, next);
+	const int after = self.horizontal ? tree.scrollLeft(self.nodeId) : tree.scrollTop(self.nodeId);
+	if (after != before && tree.mountedRoot() >= 0) {
 		tree.refresh(tree.mountedRoot(), tree.mountedWidth(), tree.mountedHeight());
 	}
 	[self updateScrollTelemetryWithScale:scale];
@@ -207,8 +224,8 @@ bool rectNearlyEqual(CGRect a, CGRect b)
 		[self updateScrollTelemetryWithScale:scale];
 		return;
 	}
-	const CGFloat maxOffset = std::max<CGFloat>(0, scrollView.contentSize.height - scrollView.bounds.size.height);
-	const CGFloat rawOffset = scrollView.contentOffset.y;
+	const CGFloat maxOffset = [self geaMaxOffset];
+	const CGFloat rawOffset = [self geaRawOffset];
 	const BOOL nativeScrollActive = scrollView.tracking || scrollView.dragging || scrollView.decelerating;
 	const BOOL rubberBanding = rawOffset < -0.5 || rawOffset > maxOffset + 0.5;
 	if (nativeScrollActive || rubberBanding) {
@@ -247,8 +264,20 @@ void applyScrollProps(GeaNativeScrollContainer *scrollView,
                       CGFloat scale)
 {
 	scrollView.nodeId = nodeId;
-	const CGFloat w = static_cast<CGFloat>(node.layout.width) * scale;
-	const CGFloat h = static_cast<CGFloat>(std::max<int>(node.layout.height, node.layout.scroll_content_height)) * scale;
+	const BOOL horizontal = isHorizontallyScrollableNode(node) ? YES : NO;
+	if (scrollView.horizontal != horizontal) {
+		scrollView.horizontal = horizontal;
+		// UIScrollView bounces on the axis it is told to; a rail that bounces
+		// vertically inside a box its own height feels broken.
+		scrollView.alwaysBounceHorizontal = horizontal;
+		scrollView.alwaysBounceVertical = !horizontal;
+	}
+	// The content only grows along the scrolling axis; across it the box's own
+	// size is the content size, or UIScrollView would offer slack in both.
+	const CGFloat w = static_cast<CGFloat>(horizontal ? std::max<int>(node.layout.width, node.layout.scroll_content_width)
+	                                                  : node.layout.width) * scale;
+	const CGFloat h = static_cast<CGFloat>(horizontal ? node.layout.height
+	                                                  : std::max<int>(node.layout.height, node.layout.scroll_content_height)) * scale;
 	const CGSize nextContentSize = CGSizeMake(w, h);
 	if (std::fabs(scrollView.contentSize.width - nextContentSize.width) > 0.5 ||
 	    std::fabs(scrollView.contentSize.height - nextContentSize.height) > 0.5) {
@@ -259,17 +288,17 @@ void applyScrollProps(GeaNativeScrollContainer *scrollView,
 	scrollView.hidden = node.style.display == 1 || node.style.opacity == 0;
 	scrollView.userInteractionEnabled = !scrollView.hidden;
 
-	const CGFloat maxOffset = std::max<CGFloat>(0, scrollView.contentSize.height - scrollView.bounds.size.height);
-	const CGFloat rawOffset = scrollView.contentOffset.y;
+	const CGFloat maxOffset = [scrollView geaMaxOffset];
+	const CGFloat rawOffset = [scrollView geaRawOffset];
 	const BOOL nativeScrollActive = scrollView.tracking || scrollView.dragging || scrollView.decelerating;
 	const BOOL rubberBanding = rawOffset < -0.5 || rawOffset > maxOffset + 0.5;
 	if (!nativeScrollActive && !rubberBanding) {
-		const CGFloat desired = std::clamp(static_cast<CGFloat>(gea::embedded::ui::Tree::instance().scrollTop(nodeId)) * scale,
-		                                   static_cast<CGFloat>(0),
-		                                   maxOffset);
-		if (std::fabs(scrollView.contentOffset.y - desired) > 0.5) {
+		auto &tree = gea::embedded::ui::Tree::instance();
+		const int treeOffset = horizontal ? tree.scrollLeft(nodeId) : tree.scrollTop(nodeId);
+		const CGFloat desired = std::clamp(static_cast<CGFloat>(treeOffset) * scale, static_cast<CGFloat>(0), maxOffset);
+		if (std::fabs(rawOffset - desired) > 0.5) {
 			scrollView.syncingFromTree = YES;
-			scrollView.contentOffset = CGPointMake(0, desired);
+			scrollView.contentOffset = horizontal ? CGPointMake(desired, 0) : CGPointMake(0, desired);
 			scrollView.syncingFromTree = NO;
 		}
 	}

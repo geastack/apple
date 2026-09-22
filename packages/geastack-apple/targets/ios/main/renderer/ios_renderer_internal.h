@@ -36,8 +36,14 @@
 @property(nonatomic, strong) UILabel *debugBottomMarkerLabel;
 @property(nonatomic, assign) CGFloat minObservedContentOffsetY;
 @property(nonatomic, assign) CGFloat maxObservedContentOffsetY;
+// Which axis this container scrolls. A gea scroll box is one or the other, never
+// both: the engine reports overflow per axis and the app declares one of them.
+@property(nonatomic, assign) BOOL horizontal;
 - (void)updateScrollTelemetryWithScale:(CGFloat)scale;
 - (void)commitNativeScrollTopWithScale:(CGFloat)scale;
+// Offsets along whichever axis `horizontal` selects.
+- (CGFloat)geaMaxOffset;
+- (CGFloat)geaRawOffset;
 @end
 
 namespace gea::ios::renderer {
@@ -50,6 +56,7 @@ UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color, std::u
 CGFloat canvasScaleForView(UIView *view);
 void dispatchSyntheticTap(UIView *rootView, CGPoint point);
 bool isScrollableNode(const gea::embedded::ui::Node &node);
+bool isHorizontallyScrollableNode(const gea::embedded::ui::Node &node);
 NSMutableDictionary<NSNumber *, UIView *> *nodeIdToView();
 NSString *NSStringFromText(const std::string &value);
 NSTextAlignment textAlignmentForStyle(int align);
