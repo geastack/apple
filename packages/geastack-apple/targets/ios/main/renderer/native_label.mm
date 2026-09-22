@@ -149,6 +149,11 @@ void applyTextProps(GeaNativeLabel *label, const gea::embedded::ui::Node &node, 
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	paragraph.alignment = textAlignmentForStyle(node.style.text_align);
 	paragraph.lineBreakMode = NSLineBreakByWordWrapping;
+	// Only ever GROWS the line box — see the same note in macOS applyTextProps.
+	// The measurement hook pins min == max so the engine gets the CSS line box;
+	// doing that when drawing clips descenders instead, which CSS never does.
+	if (font && node.style.line_height > 0 && node.style.line_height > font.ascender - font.descender)
+		paragraph.minimumLineHeight = node.style.line_height;
 	NSMutableDictionary *attrs = textAttributes(font, color, node.style.text_decoration);
 	attrs[NSParagraphStyleAttributeName] = paragraph;
 	label.attributedText = [[NSAttributedString alloc] initWithString:raw attributes:attrs];
