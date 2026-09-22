@@ -26,6 +26,8 @@
 #define GEA_IOS_HAS_APPLE_NATIVE_BRIDGE 1
 #endif
 
+namespace gea::ios { void installWifiDriver(); }
+
 extern "C" int gea_embedded_now_ms(void);
 extern "C" void gea_ios_display_set_viewport_size(int width, int height);
 extern "C" const std::uint32_t *gea_ios_display_presented_pixels();
@@ -653,6 +655,10 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	gea_ios_display_set_viewport_size(viewportWidth, viewportHeight);
 	gea::platform::display::Display::init();
 	gea::framework::camera::registerCameraSurface();
+	// Report the phone's reachability through the WiFi facade before
+	// Application::init — apps gate remote fetches on wifi().connected()
+	// (weather sits on placeholders while it reads false).
+	gea::ios::installWifiDriver();
 	// On iOS the build sets GEA_EMBEDDED_PIXEL_FORMAT=GEA_PIXEL_RGBA8888, so the
 	// ImageStore decodes straight to full-colour RGBA8888 native pixels (no 565
 	// quantization, no separate retained buffer) for native UIImageView.

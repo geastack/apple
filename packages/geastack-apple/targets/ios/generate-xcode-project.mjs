@@ -168,6 +168,7 @@ const sources = [
   source(path.join(iosDir, 'main/font_registry.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/press_bridge.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_display.mm'), 'sourcecode.cpp.objcpp'),
+  source(path.join(iosDir, 'main/ios_network.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_timers.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_app_platform.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_memory.cpp')),
@@ -214,6 +215,8 @@ const frameworks = [
   'CoreVideo.framework',
   'ImageIO.framework',
   'MapKit.framework',
+  // ios_network.mm: NSURLSession for fetch, NWPathMonitor for the WiFi facade.
+  'Network.framework',
   'AVFoundation.framework',
   'Photos.framework',
   'Security.framework',
