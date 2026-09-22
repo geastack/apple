@@ -546,10 +546,21 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 			using gea::embedded::ui::NodeType;
 			for (int i = 0; i < tree.nodeCount(); i++) {
 				const auto &n = tree.node(i);
-				NSLog(@"  node[%d] t=%d xy=(%d,%d) wh=(%dx%d)%s",
-				      i, (int)n.type,
+				const std::string cls = tree.className(i);
+				NSLog(@"  node[%d] parent=%d t=%d class=\"%s\" xy=(%d,%d) wh=(%dx%d) "
+				       "w=%d w%%=%d minw=%d maxw=%d flex=%d basis=%d shrink=%d disp=%d dir=%d/%d "
+				       "ws=%d fs=%d lh=%d pad=(%d,%d,%d,%d)%s",
+				      i, (int)n.parent, (int)n.type, cls.c_str(),
 				      (int)n.layout.x, (int)n.layout.y,
 				      (int)n.layout.width, (int)n.layout.height,
+				      (int)n.style.width, (int)n.style.width_percent,
+				      (int)n.style.min_width, (int)n.style.max_width,
+				      (int)n.style.flex, (int)n.style.flex_basis, (int)n.style.flex_shrink,
+				      (int)n.style.display, (int)n.style.flex_direction,
+				      (int)n.style.flex_direction_explicit, (int)n.style.white_space,
+				      (int)n.style.font_size, (int)n.style.line_height,
+				      (int)n.style.padding[0], (int)n.style.padding[1],
+				      (int)n.style.padding[2], (int)n.style.padding[3],
 				      n.type == NodeType::Text && !n.text.empty() ? n.text.c_str() : "");
 			}
 			[self walkAndLogSubviews:self.rootView indent:@"  "];
