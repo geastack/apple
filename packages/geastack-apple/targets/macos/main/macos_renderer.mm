@@ -1522,6 +1522,12 @@ void applyScrollContentSize(NSScrollView *sv, const gea::embedded::ui::Node &nod
 {
 	NSView *content = sv.documentView;
 	if (!content) return;
+	// The engine reserves no scrollbar gutter: every target lays content out
+	// across the container's full width and draws its scroller over it. A
+	// legacy (always-shown) NSScroller takes its width out of the clip instead,
+	// hiding that strip of the layout and leaving the document sideways play, so
+	// the scroller stays in the overlay style.
+	if (sv.scrollerStyle != NSScrollerStyleOverlay) sv.scrollerStyle = NSScrollerStyleOverlay;
 	const CGFloat w = node.layout.width;
 	const CGFloat h = node.layout.scroll_content_height > 0
 	                      ? node.layout.scroll_content_height
