@@ -305,6 +305,9 @@ int nodeIdForView(NSView *view)
 		// (mouseDown/Dragged/Up in GeaCanvasView) — recognizing here too would
 		// double-fire the press, with this path's events carrying no coords.
 		if ([v isKindOfClass:[GeaCanvasView class]]) return NO;
+		// A scroll container's scroller tracks its own knob drag; recognizing
+		// the press here took the whole drag and the knob never moved.
+		if ([v isKindOfClass:[NSScroller class]]) return NO;
 	}
 	return YES;
 }

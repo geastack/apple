@@ -20,3 +20,12 @@ assert.match(
   /const CGFloat w = node\.layout\.width;/,
   'the document must keep the engine layout width, so no laid-out content falls outside it',
 )
+
+// The root press recognizer takes every press it attempts. A press on the
+// scroller has to reach the scroller, which tracks the knob drag itself.
+const rootPress = renderer.match(/shouldAttemptToRecognizeWithEvent:[^]*?\n\}/)?.[0] ?? ''
+assert.match(
+  rootPress,
+  /isKindOfClass:\[NSScroller class\]\]\) return NO;/,
+  'the root press recognizer must leave scroller presses to the scroller, or dragging the knob does nothing',
+)
