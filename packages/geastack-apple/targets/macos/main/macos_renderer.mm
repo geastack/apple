@@ -316,10 +316,65 @@ int nodeIdForView(NSView *view)
 // (unflipped) clip view, short content bottom-aligns, leaving a gap above the
 // first row. The document view itself stays unflipped, so syncRecursive's
 // y-flip against scroll_content_height is unchanged.
+//
+// AppKit owns the scroll position, but the engine has to be told it: a
+// VirtualList windows its rows from Tree::scrollTop, the engine offsets child
+// layout by it, and Tree::setScrollTop is what dispatches `scroll`. Without the
+// commit a trackpad scroll moved the document while the engine stayed at 0, so
+// rows past the first window were blank and onScroll never fired. Like the iOS
+// container, an overscrolled (rubber-banding) offset is not committed; the
+// settled one is.
+static int g_macosSyncDepth = 0;
+struct GeaSyncDepthScope {
+	GeaSyncDepthScope() { ++g_macosSyncDepth; }
+	~GeaSyncDepthScope() { --g_macosSyncDepth; }
+};
+
 @interface GeaFlippedClipView : NSClipView
+@property(nonatomic, assign) int nodeId;
 @end
 @implementation GeaFlippedClipView
+- (instancetype)initWithFrame:(NSRect)frameRect
+{
+	if ((self = [super initWithFrame:frameRect])) {
+		_nodeId = -1;
+		self.postsBoundsChangedNotifications = YES;
+		[[NSNotificationCenter defaultCenter] addObserver:self
+		                                         selector:@selector(geaBoundsDidChange:)
+		                                             name:NSViewBoundsDidChangeNotification
+		                                           object:self];
+	}
+	return self;
+}
+- (void)dealloc
+{
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
+}
 - (BOOL)isFlipped { return YES; }
+- (void)geaBoundsDidChange:(NSNotification *)notification
+{
+	(void)notification;
+	// A bounds change made by sync itself (content resized, offset clamped) is
+	// committed after the walk: mid-walk it would move scrollTop under children
+	// whose layout was computed for the old offset.
+	if (g_macosSyncDepth > 0) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self commitScrollTop];
+		});
+		return;
+	}
+	[self commitScrollTop];
+}
+- (void)commitScrollTop
+{
+	if (self.nodeId < 0) return;
+	auto &tree = gea::embedded::ui::Tree::instance();
+	if (self.nodeId >= tree.nodeCount()) return;
+	const CGFloat y = self.bounds.origin.y;
+	const CGFloat maxY = std::max<CGFloat>(0, NSHeight(self.documentView.frame) - NSHeight(self.bounds));
+	if (y < -0.5 || y > maxY + 0.5) return;
+	tree.setScrollTop(self.nodeId, static_cast<int>(std::lround(std::clamp<CGFloat>(y, 0, maxY))));
+}
 @end
 
 // NSSlider materialized by `<input type="range">`. Continuous; on each value
@@ -1528,7 +1583,8 @@ void applyScrollContentSize(NSScrollView *sv, const gea::embedded::ui::Node &nod
 	                      : node.layout.height;
 	// documentView always sized to the full scroll content; NSScrollView's
 	// own scrollers handle the visible window. We don't apply the tree's
-	// scroll_y here — AppKit owns the scroll position via NSScrollView.
+	// scroll_y here — AppKit owns the scroll position via NSScrollView, and
+	// GeaFlippedClipView mirrors it into the tree.
 	if (content.frame.size.width != w || content.frame.size.height != h) {
 		content.frame = NSMakeRect(0, 0, w, h);
 	}
@@ -1574,7 +1630,11 @@ void applyTypeSpecificProps(NSView *view, const gea::embedded::ui::Node &node, i
 		applyTextAreaProps((NSScrollView *)view, node, nodeId);
 	} else if (isScrollView(view)) {
 		// Both NodeType::VirtualList and overflow:scroll Views land here.
-		applyScrollContentSize((NSScrollView *)view, node);
+		NSScrollView *sv = (NSScrollView *)view;
+		if ([sv.contentView isKindOfClass:[GeaFlippedClipView class]]) {
+			((GeaFlippedClipView *)sv.contentView).nodeId = nodeId;
+		}
+		applyScrollContentSize(sv, node);
 	}
 
 	// Per-View click recognizers don't fit the framework's event-delegation
@@ -1858,6 +1918,9 @@ void syncRecursive(int nodeId, NSView *parent, int parentAbsX, int parentAbsY, i
 		parentHeightForChildren = node.layout.scroll_content_height > 0
 		                              ? node.layout.scroll_content_height
 		                              : node.layout.height;
+		// The engine lays children out at their scrolled position; the document
+		// view is already scrolled by AppKit, so place them in document space.
+		parentAbsYForChildren = node.layout.y - tree.scrollTop(nodeId);
 	}
 
 	for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) {
@@ -1900,6 +1963,7 @@ void ensureRootClickBridge(NSView *parentForRoot)
 
 void MacosRenderer::sync(NSView *parentForRoot, int rootNodeId)
 {
+	const GeaSyncDepthScope syncScope;
 	using namespace gea::embedded::ui;
 	Tree &tree = Tree::instance();
 	if (rootNodeId < 0 || rootNodeId >= tree.nodeCount()) return;
@@ -1928,6 +1992,7 @@ void MacosRenderer::sync(NSView *parentForRoot, int rootNodeId)
 
 void MacosRenderer::syncPanes(NSArray *paneViews, const int *rootNodeIds)
 {
+	const GeaSyncDepthScope syncScope;
 	using namespace gea::embedded::ui;
 	Tree &tree = Tree::instance();
 	const NSUInteger paneCount = paneViews.count;
