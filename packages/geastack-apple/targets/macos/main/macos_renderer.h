@@ -3,9 +3,11 @@
 #ifdef __OBJC__
 @class NSView;
 @class NSArray;
+@class NSEvent;
 #else
 struct NSView;
 struct NSArray;
+struct NSEvent;
 #endif
 
 namespace gea::macos {
@@ -27,6 +29,13 @@ public:
 	// views (which a naive loop of sync() calls would, since each sync()
 	// sweeps every map entry it didn't touch).
 	void syncPanes(NSArray *paneViews, const int *rootNodeIds);
+
+	// A scroll-wheel event that reached `root` (no NSScrollView took it): pans
+	// the nearest overflow-x rail under the cursor. Those rails are plain
+	// clipped views with no scroller of their own, so the wheel here and the
+	// press drag in GeaRootClickBridge are their desktop input. Returns false
+	// when there is no rail to pan, leaving the event to the responder chain.
+	bool scrollWheel(NSView *root, NSEvent *event);
 
 	// Drop all NSView associations and detach them from their parents.
 	// Called on app teardown / tree clear.
