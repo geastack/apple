@@ -20,9 +20,14 @@ void unpack(std::uint16_t rgb565, CGFloat *r, CGFloat *g, CGFloat *b)
 
 NSColor *rgb565ToNSColor(std::uint16_t rgb565)
 {
+	return rgb565ToNSColor(rgb565, 255);
+}
+
+NSColor *rgb565ToNSColor(std::uint16_t rgb565, std::uint8_t alpha)
+{
 	CGFloat r, g, b;
 	unpack(rgb565, &r, &g, &b);
-	return [NSColor colorWithSRGBRed:r green:g blue:b alpha:1.0];
+	return [NSColor colorWithSRGBRed:r green:g blue:b alpha:alpha / 255.0];
 }
 
 CGColor *rgb565ToCGColor(std::uint16_t rgb565)

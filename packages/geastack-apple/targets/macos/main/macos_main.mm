@@ -89,6 +89,12 @@ static double gea_macos_device_pixel_ratio(double viewportWidth)
 // Override to keep the default AppKit y-flip semantics (origin bottom-left).
 // MacosRenderer::applyViewStyle does its own coordinate flipping.
 - (BOOL)isFlipped { return NO; }
+// Plain node views pass the wheel up to here; the renderer pans the sideways
+// rail under the cursor with it.
+- (void)scrollWheel:(NSEvent *)event
+{
+	if (!gea::macos::MacosRenderer::instance().scrollWheel(self, event)) [super scrollWheel:event];
+}
 @end
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
