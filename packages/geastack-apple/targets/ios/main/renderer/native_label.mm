@@ -84,50 +84,45 @@
 @end
 
 namespace gea::ios::renderer {
-namespace {
 
-void fitNativeButtonLabelIfNeeded(GeaNativeLabel *label)
+// CSS `line-height` sets the LINE BOX, not a clip. When it is shorter than the
+// font's natural line -- Oswald's is 1.48em and weather asks for 0.75 to 1.1 --
+// the glyphs overflow the box and still paint. A UILabel draws inside its
+// bounds, so the CSS-sized box sheared the bottoms off `.temp`'s 54px digits and
+// every descender on a 1.0 line. Give the label the extra leading it needs,
+// centred on the box the engine allocated (CSS centres each glyph run in its
+// line box), so the painting surface matches CSS while the layout position does
+// not move -- macOS does the same for its text fields. A box that clips its own
+// overflow keeps its size: CSS cuts those glyphs too.
+CGRect textPaintFrame(const gea::embedded::ui::Node &node, CGRect frame, CGFloat scale)
 {
-	if (!label || ![label.superview isKindOfClass:[GeaNativeButton class]] || label.geaUseBitmapFont) return;
-	if (label.attributedText.length == 0) return;
-
-	const CGSize nativeSize = [label sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)];
-	if (nativeSize.width <= 0 || nativeSize.height <= 0) return;
-
-	UIView *button = label.superview;
-	const CGRect bounds = button.bounds;
-	CGRect frame = label.frame;
-	const CGFloat nextWidth = std::ceil(nativeSize.width) + 1.0;
-	const CGFloat nextHeight = std::ceil(nativeSize.height) + 1.0;
-	if (nextWidth > frame.size.width) {
-		const CGFloat centerX = CGRectGetMidX(frame);
-		frame.size.width = nextWidth;
-		frame.origin.x = centerX - nextWidth / 2.0;
-		if (bounds.size.width > 0 && nextWidth <= bounds.size.width) {
-			frame.origin.x = std::clamp<CGFloat>(frame.origin.x, 0, bounds.size.width - nextWidth);
-		}
-	}
-	if (nextHeight > frame.size.height) {
-		const CGFloat centerY = CGRectGetMidY(frame);
-		frame.size.height = nextHeight;
-		frame.origin.y = centerY - nextHeight / 2.0;
-		if (bounds.size.height > 0 && nextHeight <= bounds.size.height) {
-			frame.origin.y = std::clamp<CGFloat>(frame.origin.y, 0, bounds.size.height - nextHeight);
-		}
-	}
-	label.frame = frame;
+	if (node.style.font_id < 0 || node.style.line_height <= 0 || node.style.overflow != 0) return frame;
+	if (frame.size.height <= 0) return frame;
+	const CGFloat fontSize = std::max<CGFloat>(1.0, static_cast<CGFloat>(node.style.font_size > 0 ? node.style.font_size : 16) * scale);
+	UIFont *font = gea::ios::fontForId(node.style.font_id, fontSize, node.style.font_weight);
+	if (!font) return frame;
+	const CGFloat lineBox = static_cast<CGFloat>(node.style.line_height) * scale;
+	const int lines = std::max(1, static_cast<int>(std::lround(frame.size.height / lineBox)));
+	const CGFloat needed = font.lineHeight * lines;
+	if (needed <= frame.size.height) return frame;
+	return CGRectInset(frame, 0, -(needed - frame.size.height) / 2.0);
 }
-
-}  // namespace
 
 void applyTextProps(GeaNativeLabel *label, const gea::embedded::ui::Node &node, CGFloat scale)
 {
 	NSString *raw = NSStringFromText(node.text);
 	const CGFloat fontSize = std::max<CGFloat>(1.0, static_cast<CGFloat>(node.style.font_size > 0 ? node.style.font_size : 16) * scale);
 	UIColor *color = rgb565ToUIColor(node.style.text_color, node.style.text_alpha);
-	label.geaHostedByNativeButtonTitle = [label.superview isKindOfClass:[GeaNativeButton class]];
-	label.hidden = label.geaHostedByNativeButtonTitle;
 	label.textAlignment = textAlignmentForStyle(node.style.text_align);
+	// `white-space: nowrap` keeps the run on one line, and `text-overflow:
+	// ellipsis` (only consulted then, as in CSS) cuts it at the box with "...".
+	// Every label used to wrap whatever it was given, so weather's chip names,
+	// capped at 64px, broke onto a second line inside a one-line box.
+	const bool noWrap = node.style.white_space == 1;
+	const NSLineBreakMode lineBreak = !noWrap ? NSLineBreakByWordWrapping
+	                                  : node.style.text_overflow == 1 ? NSLineBreakByTruncatingTail
+	                                                                  : NSLineBreakByClipping;
+	label.numberOfLines = noWrap ? 1 : 0;
 	if (node.style.font_id < 0) {
 		label.geaUseBitmapFont = YES;
 		label.geaBitmapText = raw;
@@ -145,10 +140,10 @@ void applyTextProps(GeaNativeLabel *label, const gea::embedded::ui::Node &node, 
 	label.geaUseBitmapFont = NO;
 	label.geaBitmapText = nil;
 	label.geaBitmapColor = nil;
-	UIFont *font = gea::ios::fontForId(node.style.font_id, fontSize);
+	UIFont *font = gea::ios::fontForId(node.style.font_id, fontSize, node.style.font_weight);
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	paragraph.alignment = textAlignmentForStyle(node.style.text_align);
-	paragraph.lineBreakMode = NSLineBreakByWordWrapping;
+	paragraph.lineBreakMode = lineBreak;
 	// Only ever GROWS the line box — see the same note in macOS applyTextProps.
 	// The measurement hook pins min == max so the engine gets the CSS line box;
 	// doing that when drawing clips descenders instead, which CSS never does.
@@ -156,10 +151,11 @@ void applyTextProps(GeaNativeLabel *label, const gea::embedded::ui::Node &node, 
 		paragraph.minimumLineHeight = node.style.line_height;
 	NSMutableDictionary *attrs = textAttributes(font, color, node.style.text_decoration);
 	attrs[NSParagraphStyleAttributeName] = paragraph;
+	gea::ios::addSyntheticBold(attrs, node.style.font_id, fontSize, node.style.font_weight);
 	label.attributedText = [[NSAttributedString alloc] initWithString:raw attributes:attrs];
 	label.font = font;
 	label.textColor = color;
-	fitNativeButtonLabelIfNeeded(label);
+	label.lineBreakMode = lineBreak;
 	[label setNeedsDisplay];
 }
 

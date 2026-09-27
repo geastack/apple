@@ -1,7 +1,6 @@
 #include "ios_renderer_internal.h"
 
 #include "events.h"
-#include "font_registry.h"
 #include "ui/tree_internal.h"
 
 #include <algorithm>
@@ -125,55 +124,17 @@ extern "C" void gea_ios_touch_set_state(int touching, int x, int y);
 @end
 
 namespace gea::ios::renderer {
-namespace {
 
-const gea::embedded::ui::Node *firstVisibleTextChild(int nodeId)
-{
-	using gea::embedded::ui::NodeType;
-	auto &tree = gea::embedded::ui::Tree::instance();
-	if (nodeId < 0 || nodeId >= tree.nodeCount()) return nullptr;
-	const auto &buttonNode = tree.node(nodeId);
-	for (int child = buttonNode.first_child; child >= 0; child = tree.node(child).next_sibling) {
-		const auto &childNode = tree.node(child);
-		if (childNode.type == NodeType::Text && childNode.style.display != 1) return &childNode;
-	}
-	return nullptr;
-}
-
-NSAttributedString *attributedTitleForTextChild(const gea::embedded::ui::Node &textNode, CGFloat scale)
-{
-	NSString *raw = NSStringFromText(textNode.text);
-	const CGFloat fontSize = std::max<CGFloat>(1.0, static_cast<CGFloat>(textNode.style.font_size > 0 ? textNode.style.font_size : 16) * scale);
-	UIFont *font = gea::ios::fontForId(textNode.style.font_id, fontSize);
-	UIColor *color = rgb565ToUIColor(textNode.style.text_color, textNode.style.text_alpha);
-	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
-	paragraph.alignment = textAlignmentForStyle(textNode.style.text_align);
-	paragraph.lineBreakMode = NSLineBreakByWordWrapping;
-	NSMutableDictionary *attrs = textAttributes(font, color, textNode.style.text_decoration);
-	attrs[NSParagraphStyleAttributeName] = paragraph;
-	return [[NSAttributedString alloc] initWithString:raw attributes:attrs];
-}
-
-}  // namespace
-
-void applyButtonProps(GeaNativeButton *button, const gea::embedded::ui::Node &node, int nodeId, CGFloat scale)
+void applyButtonProps(GeaNativeButton *button, const gea::embedded::ui::Node &node, int nodeId)
 {
 	button.nodeId = nodeId;
 	button.userInteractionEnabled = !(node.style.display == 1 || node.style.opacity == 0 ||
 	                                  node.layout.width <= 0 || node.layout.height <= 0);
-	button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-	button.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
-	button.titleLabel.numberOfLines = 0;
-	button.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
-
-	const gea::embedded::ui::Node *titleNode = firstVisibleTextChild(nodeId);
-	if (titleNode && !titleNode->text.empty()) {
-		button.titleLabel.hidden = NO;
-		[button setAttributedTitle:attributedTitleForTextChild(*titleNode, scale) forState:UIControlStateNormal];
-	} else {
-		button.titleLabel.hidden = YES;
-		[button setAttributedTitle:nil forState:UIControlStateNormal];
-	}
+	// No UIButton title: a button's content is its children, synced as subviews
+	// where the engine laid them out (the UA sheet centres them), the way win32
+	// paints them. Lifting the first text child into a centred title and hiding
+	// every label flattened the button to one string: weather's city chips lost
+	// their temperature, and a child's own size and weight went with it.
 }
 
 }  // namespace gea::ios::renderer

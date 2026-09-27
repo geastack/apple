@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace gea::ios::renderer {
 namespace {
@@ -130,10 +132,10 @@ void applyViewStyle(UIView *view, const gea::embedded::ui::Node &node,
 		if (!CGPointEqualToPoint(view.layer.anchorPoint, CGPointMake(0.5, 0.5))) {
 			view.layer.anchorPoint = CGPointMake(0.5, 0.5);
 		}
-		const CGRect nextFrame = CGRectMake(x, y, w, h);
+		CGRect nextFrame = CGRectMake(x, y, w, h);
+		if (node.type == gea::embedded::ui::NodeType::Text) nextFrame = textPaintFrame(node, nextFrame, scale);
 		if (!rectNearlyEqual(view.frame, nextFrame)) view.frame = nextFrame;
 	}
-	view.hidden = node.style.display == 1 || node.style.opacity == 0 || w <= 0 || h <= 0;
 	view.alpha = static_cast<CGFloat>(node.style.opacity) / 255.0;
 
 	// view.alpha above is ELEMENT opacity and fades the subtree with it; a
@@ -143,15 +145,18 @@ void applyViewStyle(UIView *view, const gea::embedded::ui::Node &node,
 	                                         : UIColor.clearColor;
 	view.layer.borderWidth = static_cast<CGFloat>(std::max<int>(0, node.style.border_width)) * scale;
 	view.layer.borderColor = rgb565ToUIColor(node.style.border_color, node.style.border_alpha).CGColor;
-	const int tl = std::max<int>(0, node.style.border_radius[0]);
-	const int tr = std::max<int>(0, node.style.border_radius[1]);
-	const int br = std::max<int>(0, node.style.border_radius[2]);
-	const int bl = std::max<int>(0, node.style.border_radius[3]);
-	const CGFloat radius = (tl == tr && tr == br && br == bl)
-	                           ? static_cast<CGFloat>(tl)
-	                           : static_cast<CGFloat>(tl + tr + br + bl) / 4.0;
-	view.layer.cornerRadius = radius * scale;
-	view.clipsToBounds = view.layer.cornerRadius > 0 || node.style.overflow == 1 || node.style.overflow == 2;
+	applyCornerRadius(view.layer, node, scale);
+	// border-radius rounds the box's own background and border -- the layer does
+	// that without masking -- and a replaced element's pixels (applyImageProps
+	// clips images), but its children only when `overflow` says so. Clipping on
+	// the radius alone cut the "y" off weather's "Days" tab, whose label hangs
+	// past its 13px pill as it does in a browser.
+	const bool replaced = [view isKindOfClass:[GeaCanvasView class]];
+	view.clipsToBounds = node.style.overflow == 1 || node.style.overflow == 2 || (replaced && view.layer.cornerRadius > 0);
+	// A zero-size box still paints its overflow in CSS -- an absolutely placed
+	// child of an empty wrapper shows -- so size alone hid subtrees the browser
+	// draws. Only a box that clips takes its subtree with it.
+	view.hidden = node.style.display == 1 || node.style.opacity == 0 || ((w <= 0 || h <= 0) && view.clipsToBounds);
 }
 
 void applyImageProps(UIImageView *imageView, const gea::embedded::ui::Node &node)
@@ -183,7 +188,7 @@ void applyTypeSpecificProps(UIView *view, const gea::embedded::ui::Node &node, i
 	if ([view isKindOfClass:[GeaNativeScrollContainer class]]) {
 		applyScrollProps((GeaNativeScrollContainer *)view, node, nodeId, scale);
 	} else if (node.type == NodeType::Button) {
-		applyButtonProps((GeaNativeButton *)view, node, nodeId, scale);
+		applyButtonProps((GeaNativeButton *)view, node, nodeId);
 	} else if (node.type == NodeType::Text) {
 		applyTextProps((GeaNativeLabel *)view, node, scale);
 	} else if (node.type == NodeType::Image) {
@@ -212,20 +217,22 @@ UIView *ensureViewForNode(int nodeId, const gea::embedded::ui::Node &node)
 	return view;
 }
 
-void syncRecursive(int nodeId, UIView *parent, int parentAbsX, int parentAbsY, CGFloat scale,
-                   NSMutableSet<NSNumber *> *unseen)
+// Returns the node's view, or nil when it has none (an <input> is a text field
+// ios_main.mm manages).
+UIView *syncRecursive(int nodeId, UIView *parent, int parentAbsX, int parentAbsY, CGFloat scale,
+                      NSMutableSet<NSNumber *> *unseen)
 {
 	using namespace gea::embedded::ui;
 	Tree &tree = Tree::instance();
-	if (nodeId < 0 || nodeId >= tree.nodeCount()) return;
+	if (nodeId < 0 || nodeId >= tree.nodeCount()) return nil;
 	const Node &node = tree.node(nodeId);
 	const char *tagName = tree.tagName(nodeId);
-	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "input") == 0) return;
+	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "input") == 0) return nil;
 
 	NSNumber *key = @(nodeId);
 	[unseen removeObject:key];
 	UIView *view = ensureViewForNode(nodeId, node);
-	if (!view) return;
+	if (!view) return nil;
 	if (view.superview != parent) {
 		[view removeFromSuperview];
 		[parent addSubview:view];
@@ -241,9 +248,13 @@ void syncRecursive(int nodeId, UIView *parent, int parentAbsX, int parentAbsY, C
 		parentAbsYForChildren = node.layout.y - tree.scrollTop(nodeId);
 	}
 
+	std::vector<std::pair<int, UIView *>> children;
 	for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) {
-		syncRecursive(child, parentForChildren, parentAbsXForChildren, parentAbsYForChildren, scale, unseen);
+		UIView *childView = syncRecursive(child, parentForChildren, parentAbsXForChildren, parentAbsYForChildren, scale, unseen);
+		if (childView) children.emplace_back(tree.node(child).style.z_index, childView);
 	}
+	stackChildViews(parentForChildren, children);
+	return view;
 }
 
 }  // namespace
@@ -266,14 +277,20 @@ void dumpLayout(UIView *parentForRoot, int rootNodeId)
 	for (int i = 0; i < tree.nodeCount(); i++) {
 		const auto &n = tree.node(i);
 		const std::string cls = tree.className(i);
-		NSLog(@"  node[%d] parent=%d t=%d class=\"%s\" xy=(%d,%d) wh=(%dx%d) pad=(%d,%d,%d,%d) maxwh=(%d,%d) disp=%d%s",
+		NSLog(@"  node[%d] parent=%d t=%d class=\"%s\" xy=(%d,%d) wh=(%dx%d) pad=(%d,%d,%d,%d) maxwh=(%d,%d) disp=%d "
+		      @"fs=%d fw=%d lh=%d ws=%d to=%d z=%d ov=%d/%d/%d scroll=(%d,%d) %s",
 		      i, static_cast<int>(n.parent), static_cast<int>(n.type), cls.c_str(),
 		      static_cast<int>(n.layout.x), static_cast<int>(n.layout.y),
 		      static_cast<int>(n.layout.width), static_cast<int>(n.layout.height),
 		      static_cast<int>(n.style.padding[0]), static_cast<int>(n.style.padding[1]),
 		      static_cast<int>(n.style.padding[2]), static_cast<int>(n.style.padding[3]),
 		      static_cast<int>(n.style.max_width), static_cast<int>(n.style.max_height),
-		      static_cast<int>(n.style.display),
+		      static_cast<int>(n.style.display), static_cast<int>(n.style.font_size),
+		      static_cast<int>(n.style.font_weight), static_cast<int>(n.style.line_height),
+		      static_cast<int>(n.style.white_space), static_cast<int>(n.style.text_overflow),
+		      static_cast<int>(n.style.z_index), static_cast<int>(n.style.overflow),
+		      static_cast<int>(n.style.overflow_x), static_cast<int>(n.style.overflow_y),
+		      static_cast<int>(n.layout.scroll_x), static_cast<int>(n.layout.scroll_y),
 		      n.type == NodeType::Text && !n.text.empty() ? n.text.c_str() : "");
 	}
 	for (NSNumber *key in [nodeIdToView() allKeys]) {
@@ -281,8 +298,7 @@ void dumpLayout(UIView *parentForRoot, int rootNodeId)
 		NSString *scroll = @"";
 		if ([view isKindOfClass:[GeaNativeScrollContainer class]]) {
 			GeaNativeScrollContainer *sc = (GeaNativeScrollContainer *)view;
-			scroll = [NSString stringWithFormat:@" axis=%s content=%@ offset=%.1f/%.1f",
-			          sc.horizontal ? "x" : "y", NSStringFromCGSize(sc.contentSize),
+			scroll = [NSString stringWithFormat:@" content=%@ offset=%.1f/%.1f", NSStringFromCGSize(sc.contentSize),
 			          [sc geaRawOffset], [sc geaMaxOffset]];
 		}
 		NSLog(@"  view[%@] %@ frame=%@ hidden=%d alpha=%.2f clip=%d%@", key,
