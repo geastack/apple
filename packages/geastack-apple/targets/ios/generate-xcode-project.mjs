@@ -70,7 +70,17 @@ if (!skipAppIcon) gea(['apps', 'apple-icons', appId, '--platform', 'ios', '--ass
 // against; ios_main.mm turns it into the device pixel ratio for this screen. It
 // rides Info.plist because it is a property of the bundled app, and each app gets
 // its own bundle.
-const designWidth = Number(appMeta.designWidth) > 0 ? Number(appMeta.designWidth) : 0
+// A CLI whose `apps inspect` does not report the field yet leaves it to the
+// app's own package.json, as build-windows.mjs reads it.
+let designWidth = Number(appMeta.designWidth) > 0 ? Number(appMeta.designWidth) : 0
+if (!(designWidth > 0) && appRoot) {
+  try {
+    designWidth = Number(JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).gea?.designWidth ?? 0)
+  } catch {
+    designWidth = 0
+  }
+  if (!(designWidth > 0)) designWidth = 0
+}
 const designWidthKeys = designWidth > 0 ? `<key>GeaDesignWidth</key><real>${designWidth}</real>` : ''
 
 const plistTemplate = fs.readFileSync(path.join(iosDir, 'Info.plist.in'), 'utf8')
