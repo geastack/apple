@@ -234,11 +234,26 @@ RESOLVED_APP_META="$APP_META"
 # --format shell is a fixed four-field line, so the design width comes from the
 # JSON summary. It reaches the runtime through Info.plist (see Info.plist.in):
 # the window size lives in macos.json, but this is a property of the app's
-# stylesheets, not of one window, so it belongs with the bundle metadata.
-APP_DESIGN_WIDTH="$(node "$GEA_CLI" --project "$GEA_APPS_ROOT" apps inspect "$APP_ID" --format json 2>/dev/null \
-  | node -e "let s='';process.stdin.on('data',(c)=>s+=c).on('end',()=>{try{process.stdout.write(String(JSON.parse(s).designWidth||0))}catch{process.stdout.write('0')}})" \
-  || echo 0)"
-if [[ "$APP_DESIGN_WIDTH" != "0" ]]; then
+# stylesheets, not of one window, so it belongs with the bundle metadata. A CLI
+# whose `apps inspect` does not report the field yet falls back to the app's
+# package.json `gea.designWidth`, as build-windows.mjs does.
+#
+# Every step tolerates failure and the result is checked as a number: this
+# used to pass an undefined `--project "$GEA_APPS_ROOT"` (fatal under set -u),
+# the parser still printed its "0", `|| echo 0` appended another, and the
+# bundle shipped `<real>00</real>` -- no design width at all.
+APP_INSPECT_JSON="$(node "$GEA_CLI" apps inspect "$APP_ID" --format json 2>/dev/null || true)"
+APP_DESIGN_WIDTH="$(APP_INSPECT_JSON="$APP_INSPECT_JSON" APP_ROOT_DIR="${_APP_ROOT:-}" node -e '
+const fs = require("fs")
+const path = require("path")
+let width = 0
+try { width = Number(JSON.parse(process.env.APP_INSPECT_JSON).designWidth) || 0 } catch {}
+if (!(width > 0) && process.env.APP_ROOT_DIR) {
+  try { width = Number(JSON.parse(fs.readFileSync(path.join(process.env.APP_ROOT_DIR, "package.json"), "utf8")).gea?.designWidth) || 0 } catch {}
+}
+process.stdout.write(String(width > 0 ? width : 0))
+' 2>/dev/null || true)"
+if [[ "$APP_DESIGN_WIDTH" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v width="$APP_DESIGN_WIDTH" 'BEGIN { exit !(width > 0) }'; then
   DESIGN_WIDTH_KEYS="<key>GeaDesignWidth</key><real>$APP_DESIGN_WIDTH</real>"
 else
   DESIGN_WIDTH_KEYS=""
