@@ -599,8 +599,9 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		frame = UIEdgeInsetsInsetRect(self.rootView.bounds, self.rootView.safeAreaInsets);
 	}
 	if (frame.size.width <= 0 || frame.size.height <= 0) frame = self.rootView.bounds;
-	self.displayView.frame = frame;
-	if (self.nativeRootView) self.nativeRootView.frame = self.rootView.bounds;
+	// Runs every frame (tick), so an unchanged frame must not be re-set.
+	if (!CGRectEqualToRect(self.displayView.frame, frame)) self.displayView.frame = frame;
+	if (self.nativeRootView && !CGRectEqualToRect(self.nativeRootView.frame, self.rootView.bounds)) self.nativeRootView.frame = self.rootView.bounds;
 }
 
 - (void)installNativeRootView:(UIView *)view
@@ -714,6 +715,9 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 - (void)tick:(CADisplayLink *)link
 {
 	(void)link;
+	// The display view tracks the safe area, which moves on rotation; only launch
+	// placed it, and autoresizing stretched the launch frame instead.
+	[self layoutDisplayViewInSafeArea];
 	// Republish the viewport whenever it changes. Application::init publishes it
 	// once at launch and nothing did afterwards, so vw/vh lengths and @media
 	// conditions stayed frozen at the launch size — rotation, a split view or a
@@ -728,8 +732,21 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		if (vw != lastViewportWidth || vh != lastViewportHeight) {
 			lastViewportWidth = vw;
 			lastViewportHeight = vh;
+			// The canvas and the mounted root were sized once, at launch. The
+			// canvas width is what canvasScaleForView maps layout px onto the
+			// screen with, and the root box is what the layout fills: left at the
+			// launch size, a new viewport (and, under gea.designWidth, a new
+			// device pixel ratio) stretched the old layout instead of reflowing it.
+			gea_ios_display_set_viewport_size(vw, vh);
 			gea::embedded::ui::Document::setPreferredMountSize(vw, vh);
 			gea::embedded::ui::setViewportMetrics(vw, vh, gea_ios_device_pixel_ratio(viewport.width));
+			auto &tree = gea::embedded::ui::Tree::instance();
+			const int root = tree.mountedRoot();
+			if (root >= 0 && (tree.mountedWidth() != vw || tree.mountedHeight() != vh)) {
+				gea::embedded::ui::NodeHandle(root).style().width(vw);
+				gea::embedded::ui::NodeHandle(root).style().height(vh);
+				tree.refresh(root, vw, vh);
+			}
 		}
 	}
 	gea::framework::app::Application::frame(gea_embedded_now_ms());
