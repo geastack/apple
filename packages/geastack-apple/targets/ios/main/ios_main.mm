@@ -12,6 +12,7 @@
 #include "ios_renderer.h"
 #include "ios_root_background.h"
 #include "pixel.h"
+#include "renderer/ios_renderer_internal.h"
 #include "ui/document.h"
 #include "ui/style.h"
 #include "ui/tree_internal.h"
@@ -372,18 +373,11 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		                                         : UIColor.clearColor;
 		field.layer.borderWidth = static_cast<CGFloat>(std::max<int>(0, node.style.border_width)) * canvasScale;
 		field.layer.borderColor = rgb565ToUIColor(node.style.border_color, node.style.border_alpha).CGColor;
-		const int tl = std::max<int>(0, node.style.border_radius[0]);
-		const int tr = std::max<int>(0, node.style.border_radius[1]);
-		const int br = std::max<int>(0, node.style.border_radius[2]);
-		const int bl = std::max<int>(0, node.style.border_radius[3]);
-		const CGFloat radius = (tl == tr && tr == br && br == bl)
-		                           ? static_cast<CGFloat>(tl)
-		                           : static_cast<CGFloat>(tl + tr + br + bl) / 4.0;
-		field.layer.cornerRadius = radius * canvasScale;
+		gea::ios::renderer::applyCornerRadius(field.layer, node, canvasScale);
 		field.layer.masksToBounds = field.layer.cornerRadius > 0;
 		const CGFloat fontSize = std::max<CGFloat>(1.0, static_cast<CGFloat>(node.style.font_size > 0 ? node.style.font_size : 16) * canvasScale);
 		field.textColor = rgb565ToUIColor(node.style.text_color);
-		field.font = gea::ios::fontForId(node.style.font_id, fontSize);
+		field.font = gea::ios::fontForId(node.style.font_id, fontSize, node.style.font_weight);
 		field.textAlignment = textAlignmentForStyle(node.style.text_align);
 		NSMutableDictionary *textAttrs = textAttributes(field.font, field.textColor, node.style.text_decoration);
 		field.defaultTextAttributes = textAttrs;
