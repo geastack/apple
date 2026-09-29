@@ -195,16 +195,26 @@ static int geaKeyCodeForCommand(SEL sel)
 }
 @end
 
-// Root-level click handler. Installed once on the contentView during
-// MacosRenderer::sync. On click, asks the recognizer for the location,
+// Root-level press handler. Installed once on the contentView during
+// MacosRenderer::sync. On mouse-down, asks the recognizer for the location,
 // hit-tests against the root, then walks up via nodeIdForView to find the
-// deepest view that's tagged with a node id, and dispatches click+press
-// to that nodeId. Matches the framework's event-delegation model — listeners
-// bound on document.body fire and check event.target to figure out which
-// node was clicked.
+// deepest view that's tagged with a node id, and dispatches the gesture —
+// touchstart, touchmove while dragging, touchend, then click — to that nodeId,
+// each carrying tree coordinates. Matches the framework's event-delegation
+// model — listeners bound on document.body fire and check event.target to
+// figure out which node was pressed.
 @interface GeaRootClickBridge : NSObject <NSGestureRecognizerDelegate>
 @property(nonatomic, weak) NSView *rootView;
 @property(nonatomic, assign) int pressedNodeId;  // -1 when no press in flight
+// Tree-space origin of rootView: 0,0 for a window root, the pane node's
+// layout.x/y for a split-view pane.
+@property(nonatomic, assign) int originX;
+@property(nonatomic, assign) int originY;
+@property(nonatomic, assign) int startX;
+@property(nonatomic, assign) int startY;
+@property(nonatomic, assign) int lastX;
+@property(nonatomic, assign) int lastY;
+@property(nonatomic, assign) BOOL dragged;
 - (void)fire:(NSGestureRecognizer *)gr;
 @end
 
@@ -234,16 +244,50 @@ int nodeIdForView(NSView *view)
 {
 	using gea::framework::events::PointerEvent;
 	using gea::framework::events::PointerEventType;
+	using gea::framework::events::TouchPoint;
 	NSView *root = self.rootView;
 	if (!root) return;
 
-	auto fireEvent = [&](int nodeId, PointerEventType type) {
+	// Recognizer location → tree coordinates. The root is unflipped and
+	// applyViewStyle maps layout units to points 1:1, flipping y against the
+	// parent's height, so undo that flip and add the root's tree origin.
+	const NSPoint pInRoot = [gr locationInView:root];
+	const int x = static_cast<int>(std::lround(pInRoot.x)) + self.originX;
+	const int y = static_cast<int>(std::lround(root.bounds.size.height - pInRoot.y)) + self.originY;
+
+	// Same payload as TouchRuntime's dispatchPointer, so a handler reads
+	// clientX/clientY (or touches[0]) identically on a canvas and a view.
+	auto fireEvent = [&](int nodeId, PointerEventType type, int px, int py, bool activeTouch) {
 		if (nodeId < 0) return;
 		auto &tree = gea::embedded::ui::Tree::instance();
 		if (nodeId >= tree.nodeCount()) return;
 		PointerEvent ev;
 		ev.type = type;
 		ev.targetId = nodeId;
+		ev.pointerId = 1;
+		ev.x = px;
+		ev.y = py;
+		ev.clientX = px;
+		ev.clientY = py;
+		ev.pageX = px;
+		ev.pageY = py;
+		ev.screenX = px;
+		ev.screenY = py;
+		ev.touchesLength = activeTouch ? 1 : 0;
+		ev.targetTouchesLength = activeTouch ? 1 : 0;
+		ev.changedTouchesLength = 1;
+		TouchPoint point{};
+		point.identifier = 1;
+		point.target = gea::framework::events::EventTarget(nodeId);
+		point.clientX = px;
+		point.clientY = py;
+		point.pageX = px;
+		point.pageY = py;
+		point.screenX = px;
+		point.screenY = py;
+		ev.touches[0] = point;
+		ev.targetTouches[0] = point;
+		ev.changedTouches[0] = point;
 		tree.dispatchEvent(ev);
 	};
 
@@ -258,13 +302,26 @@ int nodeIdForView(NSView *view)
 		if (root.window.firstResponder != root.window) {
 			[root.window makeFirstResponder:nil];
 		}
-		// Mouse-down: hit-test now, remember the node so the up phase
-		// dispatches to the same target even if the cursor drifts.
-		const NSPoint pInRoot = [gr locationInView:root];
+		// Mouse-down: hit-test now, remember the node so the move and up
+		// phases dispatch to the same target even if the cursor drifts.
 		const NSPoint pInSuper = [root convertPoint:pInRoot toView:root.superview];
 		NSView *hit = [root.superview hitTest:pInSuper];
 		self.pressedNodeId = gea::macos::nodeIdForView(hit);
-		fireEvent(self.pressedNodeId, PointerEventType::TouchStart);
+		self.startX = x;
+		self.startY = y;
+		self.lastX = x;
+		self.lastY = y;
+		self.dragged = NO;
+		fireEvent(self.pressedNodeId, PointerEventType::TouchStart, x, y, true);
+		break;
+	}
+	case NSGestureRecognizerStateChanged: {
+		if (self.pressedNodeId < 0) break;
+		if (x == self.lastX && y == self.lastY) break;
+		if (!self.dragged && (std::abs(x - self.startX) > 16 || std::abs(y - self.startY) > 16)) self.dragged = YES;
+		self.lastX = x;
+		self.lastY = y;
+		fireEvent(self.pressedNodeId, PointerEventType::TouchMove, x, y, true);
 		break;
 	}
 	case NSGestureRecognizerStateEnded:
@@ -272,10 +329,8 @@ int nodeIdForView(NSView *view)
 	case NSGestureRecognizerStateFailed: {
 		const int nodeId = self.pressedNodeId;
 		self.pressedNodeId = -1;
-		fireEvent(nodeId, PointerEventType::TouchEnd);
-		if (gr.state == NSGestureRecognizerStateEnded) {
-			fireEvent(nodeId, PointerEventType::Click);
-		}
+		fireEvent(nodeId, PointerEventType::TouchEnd, self.lastX, self.lastY, false);
+		if (gr.state == NSGestureRecognizerStateEnded && !self.dragged) fireEvent(nodeId, PointerEventType::Click, self.lastX, self.lastY, false);
 		break;
 	}
 	default:
@@ -1949,24 +2004,30 @@ MacosRenderer &MacosRenderer::instance()
 namespace {
 // Install the centralized press/click handler on a root container once.
 // Idempotent via an associated object so repeated sync passes don't stack
-// recognizers.
-void ensureRootClickBridge(NSView *parentForRoot)
+// recognizers. The tree origin is refreshed on every pass: a pane's layout
+// origin moves when its split is resized.
+void ensureRootClickBridge(NSView *parentForRoot, int originX, int originY)
 {
-	if (objc_getAssociatedObject(parentForRoot, "gea.root_click_bridge")) return;
-	GeaRootClickBridge *bridge = [[GeaRootClickBridge alloc] init];
-	bridge.rootView = parentForRoot;
-	objc_setAssociatedObject(parentForRoot, "gea.root_click_bridge", bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-	// NSPressGestureRecognizer (not NSClickGestureRecognizer) — we need the
-	// began/ended state transitions so press-and-hold semantics work.
-	// minimumPressDuration=0 fires began immediately on mouseDown.
-	NSPressGestureRecognizer *gr =
-	    [[NSPressGestureRecognizer alloc] initWithTarget:bridge action:@selector(fire:)];
-	gr.minimumPressDuration = 0;
-	gr.allowableMovement = 10000;  // don't cancel on drag — keep the press
-	// The delegate declines clicks on editable text controls so they focus and
-	// edit natively instead of being swallowed by this recognizer.
-	gr.delegate = bridge;
-	[parentForRoot addGestureRecognizer:gr];
+	GeaRootClickBridge *bridge = objc_getAssociatedObject(parentForRoot, "gea.root_click_bridge");
+	if (!bridge) {
+		bridge = [[GeaRootClickBridge alloc] init];
+		bridge.rootView = parentForRoot;
+		objc_setAssociatedObject(parentForRoot, "gea.root_click_bridge", bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		// NSPressGestureRecognizer (not NSClickGestureRecognizer) — we need the
+		// began/changed/ended state transitions so press-and-hold and drag
+		// semantics work. minimumPressDuration=0 fires began immediately on
+		// mouseDown.
+		NSPressGestureRecognizer *gr =
+		    [[NSPressGestureRecognizer alloc] initWithTarget:bridge action:@selector(fire:)];
+		gr.minimumPressDuration = 0;
+		gr.allowableMovement = 10000;  // don't cancel on drag — keep the press
+		// The delegate declines clicks on editable text controls so they focus and
+		// edit natively instead of being swallowed by this recognizer.
+		gr.delegate = bridge;
+		[parentForRoot addGestureRecognizer:gr];
+	}
+	bridge.originX = originX;
+	bridge.originY = originY;
 }
 }  // namespace
 
@@ -1977,7 +2038,7 @@ void MacosRenderer::sync(NSView *parentForRoot, int rootNodeId)
 	Tree &tree = Tree::instance();
 	if (rootNodeId < 0 || rootNodeId >= tree.nodeCount()) return;
 
-	ensureRootClickBridge(parentForRoot);
+	ensureRootClickBridge(parentForRoot, 0, 0);
 
 	// Mark every existing entry stale; syncRecursive removes the keys it
 	// touches. Anything still in the set after the walk corresponds to a
@@ -2017,11 +2078,11 @@ void MacosRenderer::syncPanes(NSArray *paneViews, const int *rootNodeIds)
 		NSView *paneView = paneViews[i];
 		const int rootNodeId = rootNodeIds[i];
 		if (rootNodeId < 0 || rootNodeId >= tree.nodeCount()) continue;
-		ensureRootClickBridge(paneView);
 		const int parentHeight = static_cast<int>(paneView.bounds.size.height);
 		// Each pane node's own layout.x/y act as its document origin, so the
 		// pane's children land relative to the pane container's top-left.
 		const Node &paneNode = tree.node(rootNodeId);
+		ensureRootClickBridge(paneView, paneNode.layout.x, paneNode.layout.y);
 		syncRecursive(rootNodeId, paneView, paneNode.layout.x, paneNode.layout.y, parentHeight, unseen);
 	}
 
