@@ -26,14 +26,11 @@
 #include <vector>
 
 // NSTextField defaults to consuming mouse events even when bezeled / editable /
-// selectable are all NO. That blocks the NSClickGestureRecognizer on the
-// containing View (e.g. an app-launcher tile) from firing when the user
-// clicks on the label, because the label sits on top and hit-tests first.
-// Override hitTest to make the label transparent — mouse events pass through
-// to the containing View where the recognizer can pick them up. We only ever
-// render non-editable, non-selectable labels via makeTextField, so this is
-// safe; if/when input fields land they'll need their own NSTextField
-// subclass that accepts mouse.
+// selectable are all NO. Keep labels in hit testing so the press bridge can
+// preserve their node identity and bubble through their logical ancestors.
+// Forward mouse handling instead of entering NSTextField's tracking loop;
+// excluding the label from hit testing loses handlers attached to text nodes.
+// Editable controls use GeaInputField and retain normal AppKit text editing.
 // NSTextFieldCell reserves a couple of pixels on each edge for the focus
 // ring even when bezeled/bordered are NO — so a field sized for the
 // measured text width clips a few pixels off the right glyph ("JUMP" →
@@ -51,7 +48,9 @@
 @end
 @implementation GeaLabelTextField
 + (Class)cellClass { return [GeaTextCell class]; }
-- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+- (void)mouseDown:(NSEvent *)event { [self.nextResponder mouseDown:event]; }
+- (void)mouseDragged:(NSEvent *)event { [self.nextResponder mouseDragged:event]; }
+- (void)mouseUp:(NSEvent *)event { [self.nextResponder mouseUp:event]; }
 @end
 
 // Editable text field used to materialize `<input>` JSX elements. Holds the
@@ -219,6 +218,14 @@ static int geaKeyCodeForCommand(SEL sel)
 @end
 
 namespace gea::macos {
+static NSView *hitTestInRoot(NSView *root, NSPoint point)
+{
+	// NSView hitTest: takes a point in its SUPERview's coordinates. Test the
+	// same root we converted from, not its superview (which expects yet another
+	// coordinate space and can select a sibling pane or the surrounding grid).
+	return [root hitTest:[root convertPoint:point toView:root.superview]];
+}
+
 int nodeIdForView(NSView *view)
 {
 	while (view) {
@@ -304,8 +311,7 @@ int nodeIdForView(NSView *view)
 		}
 		// Mouse-down: hit-test now, remember the node so the move and up
 		// phases dispatch to the same target even if the cursor drifts.
-		const NSPoint pInSuper = [root convertPoint:pInRoot toView:root.superview];
-		NSView *hit = [root.superview hitTest:pInSuper];
+		NSView *hit = gea::macos::hitTestInRoot(root, pInRoot);
 		self.pressedNodeId = gea::macos::nodeIdForView(hit);
 		self.startX = x;
 		self.startY = y;
@@ -350,15 +356,14 @@ int nodeIdForView(NSView *view)
 	(void)gestureRecognizer;
 	NSView *root = self.rootView;
 	if (!root || !root.window) return YES;
-	NSView *content = root.window.contentView;
-	const NSPoint p = [content convertPoint:event.locationInWindow fromView:nil];
-	NSView *hit = [content hitTest:p];
+	const NSPoint p = [root convertPoint:event.locationInWindow fromView:nil];
+	NSView *hit = gea::macos::hitTestInRoot(root, p);
 	for (NSView *v = hit; v != nil; v = v.superview) {
 		if ([v isKindOfClass:[NSTextView class]]) return NO;
 		if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) return NO;
 		// Canvas views dispatch their own coordinate-carrying touch events
 		// (mouseDown/Dragged/Up in GeaCanvasView) — recognizing here too would
-		// double-fire the press, with this path's events carrying no coords.
+		// double-fire the press.
 		if ([v isKindOfClass:[GeaCanvasView class]]) return NO;
 		// A scroll container's scroller tracks its own knob drag; recognizing
 		// the press here took the whole drag and the knob never moved.
