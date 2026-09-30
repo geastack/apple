@@ -1,5 +1,5 @@
 function geaAppleAppKitNativeOnly(name) {
-  throw new Error(`@geajs/apple/AppKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/AppKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export const NSViewNotSizable = 0
@@ -64,12 +64,12 @@ export function installToolbar() {
   return geaAppleAppKitNativeOnly("installToolbar")
 }
 
-export function setScrollDocumentTopAligned() {
-  return geaAppleAppKitNativeOnly("setScrollDocumentTopAligned")
-}
-
 export function runDeviceCommand() {
   return geaAppleAppKitNativeOnly("runDeviceCommand")
+}
+
+export function setScrollDocumentTopAligned() {
+  return geaAppleAppKitNativeOnly("setScrollDocumentTopAligned")
 }
 
 export class NSColor {
@@ -279,10 +279,43 @@ export class NSImageView {
   }
 }
 
+export class NSMenuItem {
+  constructor() {
+    geaAppleAppKitNativeOnly("new NSMenuItem")
+  }
+}
+
+export class NSMenu {
+  constructor() {
+    geaAppleAppKitNativeOnly("new NSMenu")
+  }
+  addItem() {
+    return geaAppleAppKitNativeOnly("NSMenu.addItem")
+  }
+}
+
+export class NSStatusBar {
+  static systemStatusBar() {
+    return geaAppleAppKitNativeOnly("NSStatusBar.systemStatusBar")
+  }
+  statusItemWithLength() {
+    return geaAppleAppKitNativeOnly("NSStatusBar.statusItemWithLength")
+  }
+  removeStatusItem() {
+    return geaAppleAppKitNativeOnly("NSStatusBar.removeStatusItem")
+  }
+}
+
+export class NSStatusItem {
+}
+
 export class NSButton {
   constructor() {
     geaAppleAppKitNativeOnly("new NSButton")
   }
+}
+
+export class NSStatusBarButton {
 }
 
 export class NSViewController {

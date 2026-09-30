@@ -57,8 +57,8 @@ export declare const ObjCTargetAction: Selector
 export declare function installRootView(view: NSView): void
 export declare function installRootViewController(viewController: NSViewController): void
 export declare function installToolbar(spec: string, newNoteTarget: NSObject | null): void
-export declare function setScrollDocumentTopAligned(scrollView: NSScrollView, content: NSView): void
 export declare function runDeviceCommand(command: string): string
+export declare function setScrollDocumentTopAligned(scrollView: NSScrollView, content: NSView): void
 
 export declare class NSColor extends NSObject {
   static whiteColor(): NSColor
@@ -240,10 +240,41 @@ export declare class NSImageView extends NSView {
   contentTintColor: NSColor | null
 }
 
+export declare class NSMenuItem extends NSObject {
+  constructor()
+  title: string
+  keyEquivalent: string
+  target: NSObject | null
+  action: Selector
+  enabled: boolean
+}
+
+export declare class NSMenu extends NSObject {
+  constructor()
+  autoenablesItems: boolean
+  addItem(item: NSMenuItem): void
+}
+
+export declare class NSStatusBar extends NSObject {
+  static systemStatusBar(): NSStatusBar
+  statusItemWithLength(length: number): NSStatusItem
+  removeStatusItem(item: NSStatusItem): void
+}
+
+export declare class NSStatusItem extends NSObject {
+  menu: NSMenu | null
+  readonly button: NSStatusBarButton | null
+  visible: boolean
+  length: number
+}
+
 export declare class NSButton extends NSControl {
   constructor()
   title: string
   bordered: boolean
+}
+
+export declare class NSStatusBarButton extends NSButton {
 }
 
 export declare class NSViewController extends NSObject {

@@ -1893,7 +1893,7 @@ if [[ "$APPLE_NATIVE" == "1" ]]; then
   LINK_FRAMEWORKS+=(
     -framework Metal -framework MetalKit -framework MapKit
     -framework CoreLocation -framework AVFoundation -framework CoreMedia
-    -framework Photos
+    -framework Photos -framework Security -framework UserNotifications
   )
 fi
 

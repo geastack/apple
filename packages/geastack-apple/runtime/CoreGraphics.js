@@ -1,5 +1,5 @@
 function geaAppleCoreGraphicsNativeOnly(name) {
-  throw new Error(`@geajs/apple/CoreGraphics ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/CoreGraphics ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export function CGRectMake() {

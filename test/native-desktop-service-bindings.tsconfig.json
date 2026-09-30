@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "types": [],
+    "lib": [
+      "ES2022"
+    ],
+    "paths": {
+      "@geastack/apple/*": [
+        "../packages/geastack-apple/generated/*.d.ts"
+      ],
+      "@geastack/core": [
+        "../node_modules/@geastack/core/index.d.ts",
+        "../node_modules/@geastack/core/runtime.ts"
+      ]
+    }
+  },
+  "files": [
+    "native-desktop-service-bindings.ts"
+  ]
+}

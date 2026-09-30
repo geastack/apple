@@ -1,3 +1,5 @@
+import { foundationServices, desktopFrameworks } from './desktop-api.js'
+
 export type ApplePrimitiveType = 'boolean' | 'number' | 'string' | 'void' | 'selector'
 
 export type AppleTypeReference =
@@ -38,6 +40,7 @@ export interface ApplePropertyDefinition {
 }
 
 export interface AppleFunctionDefinition {
+  bridgeBody?: string
   name: string
   returns: AppleTypeReference
   parameters?: AppleParameterDefinition[]
@@ -92,6 +95,7 @@ export interface AppleBridgeConstantMetadata {
 }
 
 export interface AppleBridgeFunctionMetadata {
+  bridgeBody?: string
   framework: string
   name: string
   thunk: string
@@ -233,6 +237,8 @@ export const appleSdkFixture: AppleSdkDefinition = {
   frameworks: [
     {
       name: 'Foundation',
+      bridgeHeaders: ['dispatch/dispatch.h', 'fcntl.h', 'unistd.h', 'stdexcept', 'cmath'],
+      functions: foundationServices,
       classes: [
         { name: 'NSObject' },
         { name: 'NSData', extends: 'Foundation.NSObject' },
@@ -2085,6 +2091,40 @@ export const appleSdkFixture: AppleSdkDefinition = {
           ],
         },
         {
+          name: 'NSMenuItem', extends: 'Foundation.NSObject',
+          constructors: [{ name: 'init', selector: 'init', returns: { kind: 'class', name: 'AppKit.NSMenuItem' } }],
+          properties: [
+            { name: 'title', type: stringType },
+            { name: 'keyEquivalent', type: stringType },
+            { name: 'target', type: { kind: 'class', name: 'Foundation.NSObject', nullable: true } },
+            { name: 'action', type: selectorType },
+            { name: 'enabled', type: { kind: 'primitive', name: 'boolean' } },
+          ],
+        },
+        {
+          name: 'NSMenu', extends: 'Foundation.NSObject',
+          constructors: [{ name: 'init', selector: 'init', returns: { kind: 'class', name: 'AppKit.NSMenu' } }],
+          properties: [{ name: 'autoenablesItems', type: { kind: 'primitive', name: 'boolean' } }],
+          methods: [{ name: 'addItem', selector: 'addItem:', returns: voidType, parameters: [{ name: 'item', type: { kind: 'class', name: 'AppKit.NSMenuItem' } }] }],
+        },
+        {
+          name: 'NSStatusBar', extends: 'Foundation.NSObject',
+          methods: [
+            { name: 'systemStatusBar', selector: 'systemStatusBar', static: true, returns: { kind: 'class', name: 'AppKit.NSStatusBar' } },
+            { name: 'statusItemWithLength', selector: 'statusItemWithLength:', returns: { kind: 'class', name: 'AppKit.NSStatusItem' }, parameters: [{ name: 'length', type: numberType }] },
+            { name: 'removeStatusItem', selector: 'removeStatusItem:', returns: voidType, parameters: [{ name: 'item', type: { kind: 'class', name: 'AppKit.NSStatusItem' } }] },
+          ],
+        },
+        {
+          name: 'NSStatusItem', extends: 'Foundation.NSObject',
+          properties: [
+            { name: 'menu', type: { kind: 'class', name: 'AppKit.NSMenu', nullable: true } },
+            { name: 'button', readonly: true, type: { kind: 'class', name: 'AppKit.NSStatusBarButton', nullable: true } },
+            { name: 'visible', type: { kind: 'primitive', name: 'boolean' } },
+            { name: 'length', type: numberType },
+          ],
+        },
+        {
           name: 'NSButton',
           extends: 'AppKit.NSControl',
           constructors: [{ name: 'init', selector: 'init', returns: { kind: 'class', name: 'AppKit.NSButton' } }],
@@ -2093,6 +2133,7 @@ export const appleSdkFixture: AppleSdkDefinition = {
             { name: 'bordered', type: { kind: 'primitive', name: 'boolean' } },
           ],
         },
+        { name: 'NSStatusBarButton', extends: 'AppKit.NSButton' },
         {
           name: 'NSViewController',
           extends: 'Foundation.NSObject',
@@ -2269,6 +2310,7 @@ export const appleSdkFixture: AppleSdkDefinition = {
         },
       ],
     },
+    ...desktopFrameworks,
   ],
 }
 
@@ -2440,7 +2482,7 @@ function sourceBackedBridgeDeclarations(metadata: AppleBridgeMetadata): string[]
     declarations.push(bridgeDeclaration(name, returnType, params))
   }
   for (const fn of Object.values(metadata.functions)) {
-    if (fn.framework === 'Dispatch' || fn.framework === 'Metal') {
+    if (fn.bridgeBody !== undefined || fn.framework === 'Dispatch' || fn.framework === 'Metal') {
       append(fn.thunk, cppValueType(fn.returns, fn.framework), fn.parameters.map((parameter) => bridgeParameter(parameter, fn.framework)).join(', '))
     }
   }
@@ -2562,6 +2604,11 @@ export function generateAppleNativeBridgeObjCxxSource(metadata: AppleBridgeMetad
   )
 
   appendFoundationStringConversions(lines, metadata)
+  for (const fn of Object.values(metadata.functions)) {
+    if (fn.bridgeBody === undefined) continue
+    const parameters = fn.parameters.map((parameter) => bridgeParameter(parameter, fn.framework)).join(', ')
+    lines.push(`${cppValueType(fn.returns, fn.framework)} ${fn.thunk}(${parameters}) {`, fn.bridgeBody, '}', '')
+  }
   appendDispatchBridges(lines, metadata)
   appendAVFoundationBridges(lines, metadata)
   appendPhotosBridges(lines, metadata)
@@ -3135,6 +3182,7 @@ function functionMetadata(framework: string, fn: AppleFunctionDefinition): Apple
     thunk: frameworkFunctionThunk(framework, fn.name),
     returns: fn.returns,
     parameters: fn.parameters ?? [],
+    ...(fn.bridgeBody !== undefined ? { bridgeBody: fn.bridgeBody } : {}),
   }
 }
 

@@ -1,5 +1,5 @@
 function geaAppleCoreLocationNativeOnly(name) {
-  throw new Error(`@geajs/apple/CoreLocation ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/CoreLocation ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export const kCLLocationAccuracyBest = -1

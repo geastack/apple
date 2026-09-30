@@ -5,11 +5,15 @@
   "private": true,
   "description": "Native Apple build targets (macOS AppKit, iOS) for geastack apps.",
   "dependencies": {
-    "@geastack/core": "^0.1.23",
     "@geastack/compiler": "^1.0.15",
+    "@geastack/core": "^0.1.23",
     "@geastack/geatsc-plugin-gea": "^0.1.6"
   },
   "scripts": {
     "test": "for f in $(git ls-files | grep -E '(^|/)(test[-_][^/]*|[^/]*\\.test)\\.mjs$'); do echo \"==> $f\"; node \"$f\" || exit 1; done"
+  },
+  "devDependencies": {
+    "@geastack/apple": "file:packages/geastack-apple",
+    "@geastack/geatsc-plugin-apple-native": "file:packages/geatsc-plugin-apple-native"
   }
 }

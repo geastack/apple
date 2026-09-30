@@ -1,5 +1,5 @@
 function geaAppleUIKitNativeOnly(name) {
-  throw new Error(`@geajs/apple/UIKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/UIKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export const UIAlertActionStyleDefault = 0

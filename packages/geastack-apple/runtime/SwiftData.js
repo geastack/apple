@@ -1,5 +1,5 @@
 function geaAppleSwiftDataNativeOnly(name) {
-  throw new Error(`@geajs/apple/SwiftData ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/SwiftData ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export function openModelContainer() {

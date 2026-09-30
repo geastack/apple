@@ -216,6 +216,8 @@ const frameworks = [
   'MapKit.framework',
   'AVFoundation.framework',
   'Photos.framework',
+  'Security.framework',
+  'UserNotifications.framework',
   'Metal.framework',
   'MetalKit.framework',
   'Foundation.framework',

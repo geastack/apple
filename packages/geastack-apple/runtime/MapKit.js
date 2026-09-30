@@ -1,5 +1,5 @@
 function geaAppleMapKitNativeOnly(name) {
-  throw new Error(`@geajs/apple/MapKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/MapKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export const MKMapTypeStandard = 0

@@ -1,5 +1,5 @@
 function geaAppleAVFoundationNativeOnly(name) {
-  throw new Error(`@geajs/apple/AVFoundation ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/AVFoundation ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export const AVMediaTypeVideo = "vide"

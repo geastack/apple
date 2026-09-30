@@ -40,6 +40,7 @@ export interface AppleBridgeConstantMetadata {
 }
 
 export interface AppleBridgeFunctionMetadata {
+  bridgeBody?: string
   framework: string
   name: string
   thunk: string
@@ -938,6 +939,11 @@ function appleNativeBridgeObjCxxSource(metadata: AppleBridgeMetadata): string {
   )
   appendObjCTargetBridge(lines, metadata)
   appendFoundationStringConversions(lines, metadata)
+  for (const fn of Object.values(metadata.functions)) {
+    if (fn.bridgeBody === undefined) continue
+    const parameters = fn.parameters.map((parameter) => `${cppType(parameter.type, fn.framework)} ${parameter.name}`).join(', ')
+    lines.push(`${cppType(fn.returns, fn.framework)} ${fn.thunk}(${parameters}) {`, fn.bridgeBody, '}', '')
+  }
   appendDispatchBridges(lines, metadata)
   appendAVFoundationBridges(lines, metadata)
   appendPhotosBridges(lines, metadata)

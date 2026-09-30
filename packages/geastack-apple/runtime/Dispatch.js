@@ -1,5 +1,5 @@
 function geaAppleDispatchNativeOnly(name) {
-  throw new Error(`@geajs/apple/Dispatch ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/Dispatch ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export function dispatchAsyncGlobal() {

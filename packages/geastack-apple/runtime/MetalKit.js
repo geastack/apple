@@ -1,5 +1,5 @@
 function geaAppleMetalKitNativeOnly(name) {
-  throw new Error(`@geajs/apple/MetalKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
+  throw new Error(`@geastack/apple/MetalKit ${name} is native-only and must be lowered by @geastack/geatsc-plugin-apple-native.`)
 }
 
 export class MTKView {
