@@ -13,6 +13,7 @@
 
 #include "ui/tree_internal.h"
 #include "ui/node_model.h"
+#include "ui/style.h"
 
 #include "events.h"
 
@@ -23,6 +24,8 @@
 #include <string>
 #include <cstring>
 #include <cstdlib>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 // NSTextField defaults to consuming mouse events even when bezeled / editable /
@@ -51,6 +54,18 @@
 - (void)mouseDown:(NSEvent *)event { [self.nextResponder mouseDown:event]; }
 - (void)mouseDragged:(NSEvent *)event { [self.nextResponder mouseDragged:event]; }
 - (void)mouseUp:(NSEvent *)event { [self.nextResponder mouseUp:event]; }
+@end
+
+// A <button> the stylesheet paints itself (it has a CSS background: weather's
+// chips and pills) is a plain box whose children are laid out and drawn like
+// any other box's — see isStyledButton. It keeps the button semantics in one
+// place: a press anywhere inside it lands on the button, not on the span that
+// happens to be under the pointer, the same target the win32 surface
+// hit-test picks (it never descends into a styled button).
+@interface GeaStyledButtonView : NSView
+@end
+@implementation GeaStyledButtonView
+- (NSView *)hitTest:(NSPoint)point { return [super hitTest:point] ? self : nil; }
 @end
 
 // Editable text field used to materialize `<input>` JSX elements. Holds the
@@ -202,6 +217,11 @@ static int geaKeyCodeForCommand(SEL sel)
 // each carrying tree coordinates. Matches the framework's event-delegation
 // model — listeners bound on document.body fire and check event.target to
 // figure out which node was pressed.
+//
+// A press that travels sideways past the slop also pans the nearest overflow-x
+// rail (those are plain clipped views, not NSScrollViews — see
+// makeViewForType) and ends without a click; the wheel over such a rail pans it
+// too (MacosRenderer::scrollWheel).
 @interface GeaRootClickBridge : NSObject <NSGestureRecognizerDelegate>
 @property(nonatomic, weak) NSView *rootView;
 @property(nonatomic, assign) int pressedNodeId;  // -1 when no press in flight
@@ -214,6 +234,13 @@ static int geaKeyCodeForCommand(SEL sel)
 @property(nonatomic, assign) int lastX;
 @property(nonatomic, assign) int lastY;
 @property(nonatomic, assign) BOOL dragged;
+// The rail the press may drag, where the press landed, and the rail's offset
+// at that moment. `panning` once the pointer has travelled past the slop; the
+// press is a drag from then on, so no click fires on release.
+@property(nonatomic, assign) int panNodeId;
+@property(nonatomic, assign) NSPoint panStart;
+@property(nonatomic, assign) int panStartScroll;
+@property(nonatomic, assign) BOOL panning;
 - (void)fire:(NSGestureRecognizer *)gr;
 @end
 
@@ -235,6 +262,31 @@ int nodeIdForView(NSView *view)
 	}
 	return -1;
 }
+
+// True for the nodes that materialize as an NSScrollView (makeViewForType):
+// only a box that scrolls vertically. A rail that only pans sideways —
+// overflow-x: auto with overflow-y visible/hidden — is a plain view, clipped,
+// its children placed by the engine's own scroll_x. As a vertical NSScrollView
+// its document was only as wide as the rail, so the rail clipped and never
+// scrolled.
+bool scrollsNatively(const gea::embedded::ui::Node &node)
+{
+	using gea::embedded::ui::NodeType;
+	return node.type == NodeType::VirtualList || (node.type == NodeType::View && node.style.overflow_y == 2);
+}
+
+// The nearest node from `nodeId` up that scrolls sideways and has content to
+// reveal, or -1. Stops at a native scroll view: that one pans itself.
+int sidewaysRailFor(int nodeId)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	for (int id = nodeId; id >= 0 && id < tree.nodeCount(); id = tree.node(id).parent) {
+		const auto &node = tree.node(id);
+		if (scrollsNatively(node)) return -1;
+		if (node.style.overflow_x == 2 && node.layout.scroll_content_width > node.layout.width) return id;
+	}
+	return -1;
+}
 }  // namespace gea::macos
 
 @implementation GeaRootClickBridge
@@ -243,6 +295,7 @@ int nodeIdForView(NSView *view)
 {
 	if ((self = [super init])) {
 		_pressedNodeId = -1;
+		_panNodeId = -1;
 	}
 	return self;
 }
@@ -318,6 +371,10 @@ int nodeIdForView(NSView *view)
 		self.lastX = x;
 		self.lastY = y;
 		self.dragged = NO;
+		self.panNodeId = gea::macos::sidewaysRailFor(self.pressedNodeId);
+		self.panStart = pInRoot;
+		self.panStartScroll = gea::embedded::ui::Tree::instance().scrollLeft(self.panNodeId);
+		self.panning = NO;
 		fireEvent(self.pressedNodeId, PointerEventType::TouchStart, x, y, true);
 		break;
 	}
@@ -328,15 +385,35 @@ int nodeIdForView(NSView *view)
 		self.lastX = x;
 		self.lastY = y;
 		fireEvent(self.pressedNodeId, PointerEventType::TouchMove, x, y, true);
+		auto &tree = gea::embedded::ui::Tree::instance();
+		const int rail = self.panNodeId;
+		if (rail < 0 || rail >= tree.nodeCount()) break;
+		const CGFloat dx = pInRoot.x - self.panStart.x;
+		const CGFloat dy = pInRoot.y - self.panStart.y;
+		if (!self.panning) {
+			// A press that wanders a little is still a click; a mostly sideways
+			// travel past the slop (6 CSS px) is a drag of the rail.
+			const CGFloat slop = std::max(4.0, 6.0 * gea::embedded::ui::devicePixelRatio());
+			if (std::fabs(dx) < slop || std::fabs(dx) < std::fabs(dy)) break;
+			self.panning = YES;
+		}
+		// The rail follows the pointer; setScrollLeft clamps to its range. Layout
+		// px are window points here — the engine applies the design-width ratio.
+		tree.setScrollLeft(rail, self.panStartScroll - static_cast<int>(std::lround(dx)));
 		break;
 	}
 	case NSGestureRecognizerStateEnded:
 	case NSGestureRecognizerStateCancelled:
 	case NSGestureRecognizerStateFailed: {
 		const int nodeId = self.pressedNodeId;
+		const BOOL panned = self.panning;
 		self.pressedNodeId = -1;
+		self.panNodeId = -1;
+		self.panning = NO;
 		fireEvent(nodeId, PointerEventType::TouchEnd, self.lastX, self.lastY, false);
-		if (gr.state == NSGestureRecognizerStateEnded && !self.dragged) fireEvent(nodeId, PointerEventType::Click, self.lastX, self.lastY, false);
+		// A drag — of the pressed node or of a rail — is not a click on whatever
+		// it started on.
+		if (gr.state == NSGestureRecognizerStateEnded && !self.dragged && !panned) fireEvent(nodeId, PointerEventType::Click, self.lastX, self.lastY, false);
 		break;
 	}
 	default:
@@ -608,6 +685,27 @@ NSView *makeSwitch()
 	return sw;
 }
 
+// A CSS background on a <button> means the app styles the control itself
+// (weather's chips and pills), exactly the rule win32 materializationFor uses.
+// Such a button is a box: its children are laid out by the UA sheet and painted
+// where the engine put them. Flattening them into one NSButton title drawn in
+// the button's own font lost each child's size, weight and colour — a 16px
+// label inside a 7px button painted at 7px, a city chip lost its temperature.
+// Plain unstyled <button>s keep the native bezel.
+bool isStyledButton(const gea::embedded::ui::Node &node)
+{
+	return node.type == gea::embedded::ui::NodeType::Button && node.style.has_bg;
+}
+
+NSView *makeStyledButton()
+{
+	// No native highlight and no action of its own: presses reach it through
+	// GeaRootClickBridge like any box, so a drag that pans a rail is not a click.
+	GeaStyledButtonView *view = [[GeaStyledButtonView alloc] initWithFrame:NSZeroRect];
+	[view setWantsLayer:YES];
+	return view;
+}
+
 NSView *makeButton()
 {
 	NSButton *btn = [[NSButton alloc] initWithFrame:NSZeroRect];
@@ -759,7 +857,7 @@ NSView *makeViewForType(gea::embedded::ui::NodeType type, const char *tagName,
 	case NodeType::Text:
 		return makeTextField();
 	case NodeType::Button:
-		return makeButton();
+		return style.has_bg ? makeStyledButton() : makeButton();
 	case NodeType::Image:
 		return makeImageView();
 	case NodeType::Canvas:
@@ -768,11 +866,11 @@ NSView *makeViewForType(gea::embedded::ui::NodeType type, const char *tagName,
 		return makeScrollView();
 	case NodeType::View:
 	default: {
-		// overflow == 2 is `scroll` in the framework's style enum. Materialize
-		// such a View as an NSScrollView so AppKit handles wheel/trackpad
-		// scrolling and clipping natively, matching what the framework's
-		// pixel-renderer would do on hardware.
-		if (style.overflow == 2) return makeScrollView();
+		// overflow-y == 2 is auto/scroll in the framework's style enum.
+		// Materialize such a View as an NSScrollView so AppKit handles
+		// wheel/trackpad scrolling and clipping natively. A sideways rail stays a
+		// plain view (see scrollsNatively); applyCornerRadius clips it.
+		if (style.overflow_y == 2) return makeScrollView();
 		NSView *view = [[NSView alloc] initWithFrame:NSZeroRect];
 		[view setWantsLayer:YES];
 		return view;
@@ -964,7 +1062,10 @@ void applyCornerRadius(NSView *view, const gea::embedded::ui::Node &node, CGFloa
 		dropShapeLayer(view, &kShapeStrokeKey);
 		view.layer.mask = nil;
 		view.layer.cornerRadius = radii.rx[0];
-		view.layer.masksToBounds = view.layer.cornerRadius > 0 || node.style.overflow == 1;
+		// hidden/clip, and the auto/scroll rails kept out of NSScrollViews (see
+		// scrollsNatively): their overflow is what scrolling reveals, never what
+		// shows past the box. A rounded box (an image's radius) masks regardless.
+		view.layer.masksToBounds = view.layer.cornerRadius > 0 || node.style.overflow != 0;
 		return;
 	}
 
@@ -1031,7 +1132,7 @@ void applyCornerRadius(NSView *view, const gea::embedded::ui::Node &node, CGFloa
 	mask.fillColor = CGColorGetConstantColor(kCGColorBlack);
 	if (view.layer.mask != mask) view.layer.mask = mask;
 	// The mask already clips this layer and its subviews to the shape.
-	view.layer.masksToBounds = node.style.overflow == 1;
+	view.layer.masksToBounds = node.style.overflow != 0;
 
 	// layer.borderWidth strokes the RECTANGULAR bounds; under the mask that
 	// leaves a border on the straight edges and nothing on the curves. Stroke
@@ -1183,7 +1284,32 @@ void applyViewStyle(NSView *view, const gea::embedded::ui::Node &node,
 	const int relY = node.layout.y - parentAbsY;
 	const CGFloat yBottom = static_cast<CGFloat>(parentHeight - relY - h);
 
-	view.frame = NSMakeRect(relX, yBottom, w, h);
+	NSRect frame = NSMakeRect(relX, yBottom, w, h);
+	// A label's field is wider than its text box by the cell's side insets,
+	// which the measurement hook left out of the box (kLabelSideInset).
+	if (node.type == gea::embedded::ui::NodeType::Text) frame = NSInsetRect(frame, -gea::macos::kLabelSideInset, 0);
+
+	// CSS `line-height` sets the LINE BOX, not a clip. When it is shorter than
+	// the font's natural leading — weather's 10px/1.1 labels — the glyphs
+	// overflow the content box and still paint. An NSTextField cannot: it draws
+	// inside its frame, so a CSS-sized box sheared the tops and bottoms off
+	// every label. Give the field the extra leading it needs, centred on the box
+	// the engine allocated, so the painting surface matches CSS while the layout
+	// position does not move.
+	if (node.type == gea::embedded::ui::NodeType::Text && node.style.line_height > 0 && h > 0) {
+		NSFont *lineFont = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight);
+		if (lineFont) {
+			const CGFloat natural = std::ceil(lineFont.ascender - lineFont.descender + lineFont.leading);
+			const int lines = std::max(1, static_cast<int>(std::lround(static_cast<double>(h) / node.style.line_height)));
+			const CGFloat needed = natural * lines;
+			if (needed > h) {
+				const CGFloat grow = needed - h;
+				frame.origin.y -= grow / 2.0;
+				frame.size.height = needed;
+			}
+		}
+	}
+	view.frame = frame;
 
 	// `filter: blur()` needs CIFilter-backed layer filters, and NSView rebuilds
 	// its backing layer when this flag flips — so it has to be set before
@@ -1299,6 +1425,27 @@ NSMutableDictionary *textAttributes(NSFont *font, NSColor *color, int textDecora
 	return attrs;
 }
 
+// The node's CSS colour with its own alpha: `color: rgba(..., 0.68)` is how a
+// stylesheet dims secondary text (weather's --muted), and it painted opaque
+// white. 0 keeps meaning "unset" (opaque), as in win32 applyTextStyle.
+NSColor *textColorFor(const gea::embedded::ui::Node &node)
+{
+	return gea::macos::rgb565ToNSColor(node.style.text_color, node.style.text_alpha != 0 ? node.style.text_alpha : 255);
+}
+
+NSFont *fontFor(const gea::embedded::ui::Node &node, int fallbackSize = 0)
+{
+	const int size = node.style.font_size > 0 ? node.style.font_size : fallbackSize;
+	return gea::macos::fontForId(node.style.font_id, size, node.style.font_weight);
+}
+
+// fontFor's synthesised bold, if any, for an attributed run in that font.
+void addSyntheticBoldFor(NSMutableDictionary *attrs, const gea::embedded::ui::Node &node, int fallbackSize = 0)
+{
+	const int size = node.style.font_size > 0 ? node.style.font_size : fallbackSize;
+	gea::macos::addSyntheticBold(attrs, node.style.font_id, size, node.style.font_weight);
+}
+
 bool attributedStringHasTextDecoration(NSAttributedString *value)
 {
 	if (!value || value.length == 0) return false;
@@ -1309,8 +1456,8 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 void applyTextProps(NSTextField *tf, const gea::embedded::ui::Node &node)
 {
 	NSString *raw = [NSString stringWithUTF8String:(node.text.empty() ? "" : node.text.c_str())];
-	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
-	NSColor *color = gea::macos::rgb565ToNSColor(node.style.text_color);
+	NSFont *font = fontFor(node);
+	NSColor *color = textColorFor(node);
 
 	NSTextAlignment alignment;
 	switch (node.style.text_align) {
@@ -1342,11 +1489,41 @@ void applyTextProps(NSTextField *tf, const gea::embedded::ui::Node &node)
 	// the cell -- not the paragraph style -- applies it. Keep alignment there.
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	const CGFloat availableWidth = node.layout.width > 0 ? node.layout.width : CGFLOAT_MAX;
-	paragraph.lineBreakMode = gea::macos::lineBreakModeForText(raw, font, availableWidth);
+	// white-space: nowrap is one line: the engine measured it unbounded, so the
+	// box may be narrower than the run (max-width, a flex squeeze) and the tail
+	// is cut — with "…" under text-overflow: ellipsis ("San Fran…"), clipped
+	// otherwise. Wrapping it instead broke the run onto lines the one-line box
+	// could not show.
+	const bool singleLine = node.style.white_space == 1;
+	const NSLineBreakMode lineBreak = singleLine ? (node.style.text_overflow == 1 ? NSLineBreakByTruncatingTail : NSLineBreakByClipping)
+	                                             : gea::macos::lineBreakModeForText(raw, font, availableWidth);
+	paragraph.lineBreakMode = lineBreak;
+	// AppKit squeezes the letters of a run it is about to truncate so more of
+	// it fits ("San Franci…"); CSS cuts at the natural spacing ("San Fran…").
+	paragraph.allowsDefaultTighteningForTruncation = NO;
+	if (tf.cell.wraps == singleLine) tf.cell.wraps = !singleLine;
+	if (tf.cell.lineBreakMode != lineBreak) tf.cell.lineBreakMode = lineBreak;
+	// A line-height under the font's natural one keeps the natural line: the
+	// measurement hook pins min == max so the engine gets the CSS line box, but
+	// doing that here clips the glyphs — AppKit shrinks the drawn line to the CSS
+	// height and a descender falls outside it ("Lisbon District, PT" lost its
+	// bottom row of pixels). CSS lets such glyphs overflow the line box and still
+	// paint, which applyViewStyle's taller frame provides.
+	//
+	// A taller one is the line box: AppKit gives the whole extra to the space
+	// above the glyphs, CSS splits it evenly (half-leading), so the run is raised
+	// by half of it to sit centred in the box the engine allocated.
 	NSMutableDictionary *attrs = textAttributes(font ?: [NSFont systemFontOfSize:node.style.font_size > 0 ? node.style.font_size : 12],
 	                                            color,
 	                                            node.style.text_decoration);
+	const CGFloat natural = font ? font.ascender - font.descender : 0;
+	if (font && node.style.line_height > 0 && node.style.line_height > natural) {
+		paragraph.minimumLineHeight = node.style.line_height;
+		paragraph.maximumLineHeight = node.style.line_height;
+		attrs[NSBaselineOffsetAttributeName] = @((node.style.line_height - natural) / 2.0);
+	}
 	attrs[NSParagraphStyleAttributeName] = paragraph;
+	addSyntheticBoldFor(attrs, node);
 	NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:raw attributes:attrs];
 	if (![tf.attributedStringValue isEqualToAttributedString:attributed]) {
 		tf.attributedStringValue = attributed;
@@ -1372,8 +1549,8 @@ void applyInputProps(GeaInputField *tf, const gea::embedded::ui::Node &node, int
 	// whether the field is currently focused — so the editor clears correctly.
 	auto &tree = Tree::instance();
 	const char *value = tree.getAttribute(nodeId, "value");
-	tf.textColor = gea::macos::rgb565ToNSColor(node.style.text_color);
-	tf.font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	tf.textColor = textColorFor(node);
+	tf.font = fontFor(node);
 	switch (node.style.text_align) {
 	case 1: tf.alignment = NSTextAlignmentCenter; break;
 	case 2: tf.alignment = NSTextAlignmentRight; break;
@@ -1455,7 +1632,7 @@ void applySymbolProps(NSImageView *iv, const gea::embedded::ui::Node &node, int 
 	// SF Symbols render as template images; tint with the node's CSS color
 	// (falls back to the system label color so they adapt to dark mode).
 	if (node.style.text_color != 0) {
-		iv.contentTintColor = gea::macos::rgb565ToNSColor(node.style.text_color);
+		iv.contentTintColor = textColorFor(node);
 	} else {
 		iv.contentTintColor = [NSColor labelColor];
 	}
@@ -1492,8 +1669,8 @@ void applyTextAreaProps(NSScrollView *sv, const gea::embedded::ui::Node &node, i
 	if (!tv) return;
 	tv.nodeId = nodeId;
 
-	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size > 0 ? node.style.font_size : 14);
-	NSColor *color = gea::macos::rgb565ToNSColor(node.style.text_color);
+	NSFont *font = fontFor(node, 14);
+	NSColor *color = textColorFor(node);
 	tv.font = font ?: [NSFont systemFontOfSize:14];
 	tv.textColor = color ?: [NSColor labelColor];
 	tv.insertionPointColor = tv.textColor;
@@ -1538,11 +1715,12 @@ void applyButtonProps(NSButton *btn, const gea::embedded::ui::Node &node, int no
 			break;
 		}
 	}
-	// Buttons whose label is composed of ELEMENT children (weather's city
-	// chips: <button><span>name</span><span>temp</span></button>) have no
-	// direct Text child, and the renderer deliberately never descends into
-	// buttons — so their title vanished entirely. Collect descendant text in
-	// document order instead, joined with spaces.
+	// Buttons whose label is composed of ELEMENT children
+	// (<button><span>name</span><span>temp</span></button>) have no direct
+	// Text child, and the renderer never descends into a native button — so
+	// their title vanished entirely. Collect descendant text in document order
+	// instead, joined with spaces. (A CSS-styled button is not an NSButton at
+	// all: see isStyledButton.)
 	if (title.length == 0) {
 		NSMutableArray<NSString *> *parts = [NSMutableArray array];
 		std::vector<int> stack;
@@ -1562,30 +1740,7 @@ void applyButtonProps(NSButton *btn, const gea::embedded::ui::Node &node, int no
 		title = [parts componentsJoinedByString:@" "];
 	}
 
-	// A CSS background on the button means the app styles the chip itself
-	// (weather's translucent city chips). The default Aqua bezel would paint
-	// opaque white over that background and pin the title to black — go
-	// borderless so applyViewStyle's layer background/corner radius show, and
-	// carry the node's text color/font into an attributed title. Plain
-	// unstyled <button>s keep the native bezel and title exactly as before.
-	const bool cssStyled = node.style.has_bg;
-	if (btn.bordered != static_cast<BOOL>(!cssStyled)) btn.bordered = !cssStyled;
-	if (cssStyled) {
-		NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
-		NSColor *color = node.style.text_color != 0 ? gea::macos::rgb565ToNSColor(node.style.text_color)
-		                                            : [NSColor labelColor];
-		NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
-		paragraph.alignment = NSTextAlignmentCenter;
-		NSDictionary *attrs = @{
-			NSFontAttributeName: font ?: [NSFont systemFontOfSize:[NSFont systemFontSize]],
-			NSForegroundColorAttributeName: color,
-			NSParagraphStyleAttributeName: paragraph,
-		};
-		NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:title attributes:attrs];
-		if (![btn.attributedTitle isEqualToAttributedString:attributed]) btn.attributedTitle = attributed;
-	} else {
-		if (![btn.title isEqualToString:title]) btn.title = title;
-	}
+	if (![btn.title isEqualToString:title]) btn.title = title;
 
 	PressBridge *bridge = objc_getAssociatedObject(btn, "gea.press_bridge");
 	if (bridge) bridge.nodeId = nodeId;
@@ -1615,21 +1770,57 @@ void ensureViewClickRecognizer(NSView *view, int nodeId, bool wantsClick)
 	// pressId at runtime.
 }
 
+char kCoverLayerKey;  // CALayer painting an object-fit: cover image
+
 void applyImageProps(NSImageView *iv, const gea::embedded::ui::Node &node)
 {
 	// Re-decode when image_id changes; otherwise leave the current NSImage in
 	// place to avoid rebuilding the bitmap every frame. We stash the last
-	// imageId on the view via associated object.
+	// imageId and fit on the view via associated objects.
 	NSNumber *currentId = objc_getAssociatedObject(iv, "gea.image_id");
-	if (!currentId || currentId.intValue != node.image_id) {
-		iv.image = gea::macos::imageForId(node.image_id);
-		objc_setAssociatedObject(iv, "gea.image_id", @(node.image_id),
-		                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	NSNumber *currentFit = objc_getAssociatedObject(iv, "gea.image_fit");
+	const bool cover = node.style.image_fit == 2;
+	CALayer *coverLayer = objc_getAssociatedObject(iv, &kCoverLayerKey);
+	if (!currentId || currentId.intValue != node.image_id || !currentFit || currentFit.intValue != node.style.image_fit) {
+		NSImage *image = gea::macos::imageForId(node.image_id);
+		// object-fit: cover scales the image to FILL the box and crops the
+		// overflow. NSImageView has no aspect-fill scaling (its proportional modes
+		// all fit, i.e. contain), so a cover image is a layer of its own with
+		// resizeAspectFill gravity, clipped to the view; the view itself shows
+		// nothing. Weather's backdrop is cover: as contain it left solid bands
+		// above and below the art in a window taller than the art's aspect.
+		if (cover) {
+			if (!coverLayer) {
+				coverLayer = [CALayer layer];
+				coverLayer.contentsGravity = kCAGravityResizeAspectFill;
+				coverLayer.masksToBounds = YES;
+				// Sync passes run every frame; implicit animations would smear
+				// every resize and image swap over a quarter second.
+				coverLayer.actions = @{@"bounds" : [NSNull null], @"position" : [NSNull null], @"contents" : [NSNull null]};
+				objc_setAssociatedObject(iv, &kCoverLayerKey, coverLayer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			}
+			coverLayer.contents = image;
+			iv.image = nil;
+		} else {
+			if (coverLayer) [coverLayer removeFromSuperlayer];
+			objc_setAssociatedObject(iv, &kCoverLayerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+			coverLayer = nil;
+			iv.image = image;
+		}
+		objc_setAssociatedObject(iv, "gea.image_id", @(node.image_id), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		objc_setAssociatedObject(iv, "gea.image_fit", @(node.style.image_fit), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
+	if (coverLayer) {
+		if (coverLayer.superlayer != iv.layer) [iv.layer addSublayer:coverLayer];
+		const CGRect bounds = NSRectToCGRect(iv.bounds);
+		if (!CGRectEqualToRect(coverLayer.frame, bounds)) coverLayer.frame = bounds;
+		// Follow the box's own rounding (applyCornerRadius sets it on iv.layer).
+		if (coverLayer.cornerRadius != iv.layer.cornerRadius) coverLayer.cornerRadius = iv.layer.cornerRadius;
 	}
 	switch (node.style.image_fit) {
 	case 0: iv.imageScaling = NSImageScaleAxesIndependently; break;
 	case 1: iv.imageScaling = NSImageScaleProportionallyUpOrDown; break;
-	case 2: iv.imageScaling = NSImageScaleProportionallyUpOrDown; break;  // "cover" ~ fit
+	case 2: iv.imageScaling = NSImageScaleAxesIndependently; break;  // painted by the cover layer
 	case 3: iv.imageScaling = NSImageScaleNone; break;
 	case 4: iv.imageScaling = NSImageScaleProportionallyDown; break;
 	default: iv.imageScaling = NSImageScaleAxesIndependently;
@@ -1676,7 +1867,8 @@ void applyTypeSpecificProps(NSView *view, const gea::embedded::ui::Node &node, i
 	if (node.type == NodeType::Text) {
 		applyTextProps((NSTextField *)view, node);
 	} else if (node.type == NodeType::Button) {
-		applyButtonProps((NSButton *)view, node, nodeId);
+		// A styled button is a plain box: applyViewStyle already painted it.
+		if (!isStyledButton(node)) applyButtonProps((NSButton *)view, node, nodeId);
 	} else if (node.type == NodeType::Image) {
 		applyImageProps((NSImageView *)view, node);
 	} else if (node.type == NodeType::Canvas) {
@@ -1737,14 +1929,12 @@ bool viewMatchesNode(NSView *view, const gea::embedded::ui::Node &node,
 	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "symbol") == 0) {
 		return [view isKindOfClass:[NSImageView class]] && isSymbolView;
 	}
-	if (node.type == NodeType::VirtualList ||
-	    (node.type == NodeType::View && node.style.overflow == 2)) {
-		return isPlainScrollView;
-	}
+	if (gea::macos::scrollsNatively(node)) return isPlainScrollView;
 
 	switch (node.type) {
 	case NodeType::Text: return [view isKindOfClass:[GeaLabelTextField class]];
-	case NodeType::Button: return [view isKindOfClass:[NSButton class]];
+	case NodeType::Button:
+		return isStyledButton(node) ? [view isKindOfClass:[GeaStyledButtonView class]] : [view isKindOfClass:[NSButton class]];
 	case NodeType::Image: return [view isKindOfClass:[NSImageView class]] && !isSymbolView;
 	case NodeType::Canvas: return [view isKindOfClass:[GeaCanvasView class]];
 	case NodeType::View:
@@ -1752,6 +1942,7 @@ bool viewMatchesNode(NSView *view, const gea::embedded::ui::Node &node,
 		return [view isKindOfClass:[NSView class]] &&
 		       ![view isKindOfClass:[NSTextField class]] &&
 		       ![view isKindOfClass:[NSButton class]] &&
+		       ![view isKindOfClass:[GeaStyledButtonView class]] &&
 		       ![view isKindOfClass:[NSImageView class]] &&
 		       ![view isKindOfClass:[NSScrollView class]] &&
 		       ![view isKindOfClass:[NSVisualEffectView class]] &&
@@ -1851,11 +2042,12 @@ void appendInlineRuns(NSMutableAttributedString *out, int nodeId,
 		// ancestor's class). When the framework has filled them in we use
 		// them; otherwise we keep the parent's value as the inherited default.
 		if (node.style.text_color != 0) {
-			col = gea::macos::rgb565ToNSColor(node.style.text_color);
+			col = textColorFor(node);
 		}
-		NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+		NSFont *resolved = fontFor(node);
 		if (resolved) font = resolved;
 		NSMutableDictionary *attrs = textAttributes(font, col, node.style.text_decoration);
+		if (resolved) addSyntheticBoldFor(attrs, node);
 		[out appendAttributedString:[[NSAttributedString alloc] initWithString:str attributes:attrs]];
 		return;
 	}
@@ -1864,9 +2056,9 @@ void appendInlineRuns(NSMutableAttributedString *out, int nodeId,
 	NSColor *col = parentColor;
 	NSFont *font = parentFont;
 	if (node.style.text_color != 0) {
-		col = gea::macos::rgb565ToNSColor(node.style.text_color);
+		col = textColorFor(node);
 	}
-	NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	NSFont *resolved = fontFor(node);
 	if (resolved) font = resolved;
 	for (int c = node.first_child; c >= 0; c = tree.node(c).next_sibling) {
 		appendInlineRuns(out, c, font, col);
@@ -1904,8 +2096,8 @@ NSTextField *renderInlineComposition(int nodeId, NSView *parentNSView,
 		objc_setAssociatedObject(parentNSView, "gea.inline_field", field, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
 
-	NSFont *parentFont = gea::macos::fontForId(node.style.font_id, node.style.font_size);
-	NSColor *parentColor = gea::macos::rgb565ToNSColor(node.style.text_color);
+	NSFont *parentFont = fontFor(node);
+	NSColor *parentColor = textColorFor(node);
 	NSMutableAttributedString *composite = [[NSMutableAttributedString alloc] init];
 	for (int c = node.first_child; c >= 0; c = tree.node(c).next_sibling) {
 		appendInlineRuns(composite, c, parentFont, parentColor);
@@ -1919,8 +2111,10 @@ NSTextField *renderInlineComposition(int nodeId, NSView *parentNSView,
 	field.attributedStringValue = composite;
 	// Fill the parent's content box. The framework already laid the parent
 	// out wide enough for its children to flow, so AppKit's wrap point will
-	// match that available width.
-	field.frame = NSMakeRect(0, 0, parentNSView.bounds.size.width, parentNSView.bounds.size.height);
+	// match that available width — once the field carries the cell's side
+	// insets past both edges, as every label does (kLabelSideInset).
+	field.frame = NSMakeRect(-gea::macos::kLabelSideInset, 0, parentNSView.bounds.size.width + 2 * gea::macos::kLabelSideInset,
+	                         parentNSView.bounds.size.height);
 	field.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
 	// Mark every per-child view stale so the unseen-sweep removes them this
@@ -1930,6 +2124,39 @@ NSTextField *renderInlineComposition(int nodeId, NSView *parentNSView,
 		[unseen addObject:@(c)];
 	}
 	return field;
+}
+
+// Sibling paint order: z-index, then document order — the stable sort win32
+// childrenByStacking paints with. syncRecursive only ever appends a child's
+// view when it first lands in `container`, so subviews stayed in creation order
+// whatever the stylesheet said: weather's hero art (.hero-stage, z-index 2)
+// painted over the city name (.place-block, z-index 4) laid out before it.
+// Views that are not a child node's (none today) keep their slots.
+void stackChildViews(const gea::embedded::ui::Node &node, NSView *container)
+{
+	using namespace gea::embedded::ui;
+	Tree &tree = Tree::instance();
+	std::vector<std::pair<int, NSView *>> stacked;  // z-index, view — document order
+	for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) {
+		NSView *view = nodeIdToView()[@(child)];
+		if (view && view.superview == container) stacked.emplace_back(tree.node(child).style.z_index, view);
+	}
+	if (stacked.size() < 2) return;
+	std::stable_sort(stacked.begin(), stacked.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+	std::unordered_set<const void *> children;
+	for (const auto &entry : stacked) children.insert((__bridge const void *)entry.second);
+	NSArray<NSView *> *current = container.subviews;
+	NSMutableArray<NSView *> *reordered = nil;
+	size_t next = 0;
+	for (NSUInteger i = 0; i < current.count && next < stacked.size(); ++i) {
+		if (!children.count((__bridge const void *)current[i])) continue;
+		NSView *want = stacked[next++].second;
+		if (current[i] == want) continue;
+		if (!reordered) reordered = [current mutableCopy];
+		reordered[i] = want;
+	}
+	// Reorders in place: the same views, so nothing is removed or re-added.
+	if (reordered) container.subviews = reordered;
 }
 
 void syncRecursive(int nodeId, NSView *parent, int parentAbsX, int parentAbsY, int parentHeight,
@@ -1953,8 +2180,9 @@ void syncRecursive(int nodeId, NSView *parent, int parentAbsX, int parentAbsY, i
 
 	// NSButton renders its own title from the Text child we read in
 	// applyButtonProps; materializing the child as an NSTextField on top
-	// would just be a redundant overlay. Skip descending into Buttons.
-	if (node.type == NodeType::Button) return;
+	// would just be a redundant overlay. Skip descending into native Buttons;
+	// a styled one is a box and lays its children out like any other.
+	if (node.type == NodeType::Button && !isStyledButton(node)) return;
 
 	// `<textarea>` owns its NSTextView as its only descendant — JSX children
 	// (if any were authored) would otherwise be pushed inside NSTextView and
@@ -1996,6 +2224,7 @@ void syncRecursive(int nodeId, NSView *parent, int parentAbsX, int parentAbsY, i
 		syncRecursive(child, parentForChildren, parentAbsXForChildren, parentAbsYForChildren,
 		              parentHeightForChildren, unseen);
 	}
+	stackChildViews(node, parentForChildren);
 }
 
 }  // namespace
@@ -2096,6 +2325,45 @@ void MacosRenderer::syncPanes(NSArray *paneViews, const int *rootNodeIds)
 		[v removeFromSuperview];
 		[nodeIdToView() removeObjectForKey:gone];
 	}
+}
+
+bool MacosRenderer::scrollWheel(NSView *root, NSEvent *event)
+{
+	using namespace gea::embedded::ui;
+	if (!root || !event) return false;
+	CGFloat dx = event.scrollingDeltaX;
+	CGFloat dy = event.scrollingDeltaY;
+	// A notched mouse wheel reports lines, a trackpad or Magic Mouse points.
+	// 40 CSS px per line is what a browser on the Mac scrolls.
+	if (!event.hasPreciseScrollingDeltas) {
+		const CGFloat line = 40.0 * devicePixelRatio();
+		dx *= line;
+		dy *= line;
+	}
+	// A vertical wheel has nothing vertical to move on a rail — a box that
+	// scrolls vertically is an NSScrollView and took the event — so it pans the
+	// rail as well; up is left. Positive deltas move the content right/down.
+	const CGFloat delta = std::fabs(dx) >= std::fabs(dy) ? dx : dy;
+	if (delta == 0) return false;
+	NSView *container = root.superview ?: root;
+	NSView *hit = [root hitTest:[container convertPoint:event.locationInWindow fromView:nil]];
+	const int rail = sidewaysRailFor(nodeIdForView(hit));
+	if (rail < 0) return false;
+	Tree &tree = Tree::instance();
+	// Trackpad deltas come in fractions of a point; carry the remainder so a
+	// slow swipe still moves the rail.
+	static int carryRail = -1;
+	static CGFloat carry = 0;
+	if (carryRail != rail) {
+		carryRail = rail;
+		carry = 0;
+	}
+	carry -= delta;
+	const int step = static_cast<int>(carry);
+	if (step == 0) return true;
+	carry -= step;
+	tree.setScrollLeft(rail, tree.scrollLeft(rail) + step);
+	return true;
 }
 
 void MacosRenderer::teardown()

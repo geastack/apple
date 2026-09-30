@@ -12,6 +12,9 @@
 #include "ios_renderer.h"
 #include "ios_root_background.h"
 #include "pixel.h"
+#include "renderer/ios_renderer_internal.h"
+#include "ui/document.h"
+#include "ui/style.h"
 #include "ui/tree_internal.h"
 
 #include <algorithm>
@@ -25,6 +28,33 @@
 #include "gea/apple/native_bridge.h"
 #define GEA_IOS_HAS_APPLE_NATIVE_BRIDGE 1
 #endif
+
+namespace gea::ios { void installWifiDriver(); }
+
+// GeaDesignWidth (Info.plist, written by generate-xcode-project.mjs from the app's
+// gea.designWidth) is the logical CSS width the app's stylesheets were authored
+// against. An app that declares it gets scaled to whatever screen it lands on:
+// the engine multiplies every CSS px by the ratio (ui::cssPixelLength), so a
+// layout drawn for a 273pt-wide panel fills a 393pt iPhone instead of hugging one
+// corner of it. An app that declares nothing keeps ratio 1 — see the comment at
+// Application::init below for why that is the right default here.
+static double gea_ios_design_width(void)
+{
+	static const double designWidth = []() -> double {
+		id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"GeaDesignWidth"];
+		if (![value respondsToSelector:@selector(doubleValue)]) return 0.0;
+		const double parsed = [value doubleValue];
+		return parsed > 0.0 ? parsed : 0.0;
+	}();
+	return designWidth;
+}
+
+static double gea_ios_device_pixel_ratio(double viewportWidth)
+{
+	const double designWidth = gea_ios_design_width();
+	if (designWidth <= 0.0 || viewportWidth <= 0.0) return 1.0;
+	return viewportWidth / designWidth;
+}
 
 extern "C" int gea_embedded_now_ms(void);
 extern "C" void gea_ios_display_set_viewport_size(int width, int height);
@@ -42,16 +72,18 @@ void registerCameraSurface();
 
 namespace {
 
-UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color)
+UIColor *rgb565ToUIColor(gea::framework::graphics::pixel::native_t color, std::uint8_t alpha = 255)
 {
 	// Style colours are native pixels (RGBA8888 on iOS) — unpack full 8-bit
-	// channels so native UIKit views render true colour, not 565-quantized.
+	// channels so native UIKit views render true colour, not 565-quantized. The
+	// pixel's own alpha byte is always 255; the CSS alpha lives in a separate
+	// style field and arrives as `alpha` (see renderer/ios_renderer_internal.h).
 	int r, g, b, a;
 	gea::framework::graphics::pixel::unpackNative8(color, &r, &g, &b, &a);
 	return [UIColor colorWithRed:static_cast<CGFloat>(r) / 255.0
 	                       green:static_cast<CGFloat>(g) / 255.0
 	                        blue:static_cast<CGFloat>(b) / 255.0
-	                       alpha:1.0];
+	                       alpha:static_cast<CGFloat>(alpha) / 255.0];
 }
 
 NSString *NSStringFromAttr(const char *value)
@@ -337,21 +369,15 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		field.hidden = (node.style.display == 1 || node.style.opacity == 0 || w <= 0 || h <= 0);
 		field.userInteractionEnabled = !field.hidden;
 		field.alpha = static_cast<CGFloat>(node.style.opacity) / 255.0;
-		field.backgroundColor = node.style.has_bg ? rgb565ToUIColor(node.style.bg_color) : UIColor.clearColor;
+		field.backgroundColor = node.style.has_bg ? rgb565ToUIColor(node.style.bg_color, node.style.bg_alpha)
+		                                         : UIColor.clearColor;
 		field.layer.borderWidth = static_cast<CGFloat>(std::max<int>(0, node.style.border_width)) * canvasScale;
-		field.layer.borderColor = rgb565ToUIColor(node.style.border_color).CGColor;
-		const int tl = std::max<int>(0, node.style.border_radius[0]);
-		const int tr = std::max<int>(0, node.style.border_radius[1]);
-		const int br = std::max<int>(0, node.style.border_radius[2]);
-		const int bl = std::max<int>(0, node.style.border_radius[3]);
-		const CGFloat radius = (tl == tr && tr == br && br == bl)
-		                           ? static_cast<CGFloat>(tl)
-		                           : static_cast<CGFloat>(tl + tr + br + bl) / 4.0;
-		field.layer.cornerRadius = radius * canvasScale;
+		field.layer.borderColor = rgb565ToUIColor(node.style.border_color, node.style.border_alpha).CGColor;
+		gea::ios::renderer::applyCornerRadius(field.layer, node, canvasScale);
 		field.layer.masksToBounds = field.layer.cornerRadius > 0;
 		const CGFloat fontSize = std::max<CGFloat>(1.0, static_cast<CGFloat>(node.style.font_size > 0 ? node.style.font_size : 16) * canvasScale);
 		field.textColor = rgb565ToUIColor(node.style.text_color);
-		field.font = gea::ios::fontForId(node.style.font_id, fontSize);
+		field.font = gea::ios::fontForId(node.style.font_id, fontSize, node.style.font_weight);
 		field.textAlignment = textAlignmentForStyle(node.style.text_align);
 		NSMutableDictionary *textAttrs = textAttributes(field.font, field.textColor, node.style.text_decoration);
 		field.defaultTextAttributes = textAttrs;
@@ -567,8 +593,9 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		frame = UIEdgeInsetsInsetRect(self.rootView.bounds, self.rootView.safeAreaInsets);
 	}
 	if (frame.size.width <= 0 || frame.size.height <= 0) frame = self.rootView.bounds;
-	self.displayView.frame = frame;
-	if (self.nativeRootView) self.nativeRootView.frame = self.rootView.bounds;
+	// Runs every frame (tick), so an unchanged frame must not be re-set.
+	if (!CGRectEqualToRect(self.displayView.frame, frame)) self.displayView.frame = frame;
+	if (self.nativeRootView && !CGRectEqualToRect(self.nativeRootView.frame, self.rootView.bounds)) self.nativeRootView.frame = self.rootView.bounds;
 }
 
 - (void)installNativeRootView:(UIView *)view
@@ -644,15 +671,24 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	// physical pixels, so fixed-px app layouts (e.g. Sky Hop's 36px tiles)
 	// rendered ~3x too dense on retina. UIKit renders the native view tree
 	// crisply at the screen's content scale factor (set above) independently, so
-	// gea's internal CSS device-pixel-ratio stays 1 — otherwise `px` lengths get
-	// an extra x scale (cssPixelLength) that unitless lengths don't, blowing up
+	// gea's internal CSS device-pixel-ratio defaults to 1 — otherwise `px` lengths
+	// get an extra x scale (cssPixelLength) that unitless lengths don't, blowing up
 	// fonts (16px/36px) relative to the unitless tile layout.
+	//
+	// An app that declares gea.designWidth opts out of that default: it says its
+	// px ARE the whole layout (no unitless lengths to fall out of step with), and
+	// asks to be scaled from its own design width to this screen's. Retina is
+	// still contentScaleFactor's job either way.
 	const int viewportWidth = std::max(1, static_cast<int>(std::ceil(viewport.width)));
 	const int viewportHeight = std::max(1, static_cast<int>(std::ceil(viewport.height)));
-	const int devicePixelRatio = 1;
+	const double devicePixelRatio = gea_ios_device_pixel_ratio(viewport.width);
 	gea_ios_display_set_viewport_size(viewportWidth, viewportHeight);
 	gea::platform::display::Display::init();
 	gea::framework::camera::registerCameraSurface();
+	// Report the phone's reachability through the WiFi facade before
+	// Application::init — apps gate remote fetches on wifi().connected()
+	// (weather sits on placeholders while it reads false).
+	gea::ios::installWifiDriver();
 	// On iOS the build sets GEA_EMBEDDED_PIXEL_FORMAT=GEA_PIXEL_RGBA8888, so the
 	// ImageStore decodes straight to full-colour RGBA8888 native pixels (no 565
 	// quantization, no separate retained buffer) for native UIImageView.
@@ -673,6 +709,40 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 - (void)tick:(CADisplayLink *)link
 {
 	(void)link;
+	// The display view tracks the safe area, which moves on rotation; only launch
+	// placed it, and autoresizing stretched the launch frame instead.
+	[self layoutDisplayViewInSafeArea];
+	// Republish the viewport whenever it changes. Application::init publishes it
+	// once at launch and nothing did afterwards, so vw/vh lengths and @media
+	// conditions stayed frozen at the launch size — rotation, a split view or a
+	// safe-area change reflowed nothing. macOS does the same from its frame loop.
+	// setViewportMetrics recomputes class styles, so only call it on a real change.
+	{
+		const CGSize viewport = [self viewportSize];
+		const int vw = std::max(1, static_cast<int>(std::ceil(viewport.width)));
+		const int vh = std::max(1, static_cast<int>(std::ceil(viewport.height)));
+		static int lastViewportWidth = -1;
+		static int lastViewportHeight = -1;
+		if (vw != lastViewportWidth || vh != lastViewportHeight) {
+			lastViewportWidth = vw;
+			lastViewportHeight = vh;
+			// The canvas and the mounted root were sized once, at launch. The
+			// canvas width is what canvasScaleForView maps layout px onto the
+			// screen with, and the root box is what the layout fills: left at the
+			// launch size, a new viewport (and, under gea.designWidth, a new
+			// device pixel ratio) stretched the old layout instead of reflowing it.
+			gea_ios_display_set_viewport_size(vw, vh);
+			gea::embedded::ui::Document::setPreferredMountSize(vw, vh);
+			gea::embedded::ui::setViewportMetrics(vw, vh, gea_ios_device_pixel_ratio(viewport.width));
+			auto &tree = gea::embedded::ui::Tree::instance();
+			const int root = tree.mountedRoot();
+			if (root >= 0 && (tree.mountedWidth() != vw || tree.mountedHeight() != vh)) {
+				gea::embedded::ui::NodeHandle(root).style().width(vw);
+				gea::embedded::ui::NodeHandle(root).style().height(vh);
+				tree.refresh(root, vw, vh);
+			}
+		}
+	}
 	gea::framework::app::Application::frame(gea_embedded_now_ms());
 	[self syncAppBackgroundColor];
 	auto &tree = gea::embedded::ui::Tree::instance();

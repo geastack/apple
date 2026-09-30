@@ -153,7 +153,18 @@ resolve_gea_package() {
     fi
   done
 }
-GEA_CORE="$(resolve_gea_package @geastack/core)"
+# apple/packages/geastack-apple -> the collection root that holds core/ compiler/ cli/.
+# Inside a collection checkout the framework packages are siblings and nothing
+# links them into a node_modules anywhere above this one, so the walk above finds
+# nothing; an app that depends on @geastack/apple resolves them normally and never
+# reaches these fallbacks.
+COLLECTION_ROOT="$(cd "$ROOT_DIR/../../.." 2>/dev/null && pwd || true)"
+resolve_collection_package() {
+  local resolved="$1" candidate="$COLLECTION_ROOT/$2"
+  if [[ -n "$resolved" ]]; then printf '%s' "$resolved"; return; fi
+  if [[ -f "$candidate/package.json" ]]; then (cd "$candidate" && pwd); fi
+}
+GEA_CORE="$(resolve_collection_package "$(resolve_gea_package @geastack/core)" core/packages/core)"
 GEA_APPLE_NATIVE_PLUGIN="$(resolve_gea_package @geastack/geatsc-plugin-apple-native)"
 # An app that installs @geastack/apple gets the plugin from node_modules; inside
 # this repository it is a sibling package that nothing links, so name it there.
@@ -161,8 +172,8 @@ if [[ -z "$GEA_APPLE_NATIVE_PLUGIN" && -d "$ROOT_DIR/../geatsc-plugin-apple-nati
   GEA_APPLE_NATIVE_PLUGIN="$(cd "$ROOT_DIR/../geatsc-plugin-apple-native" && pwd)"
 fi
 [ -n "$GEA_APPLE_NATIVE_PLUGIN" ] && [ -f "$GEA_APPLE_NATIVE_PLUGIN/dist/index.js" ] || { echo "Cannot resolve @geastack/geatsc-plugin-apple-native" >&2; exit 1; }
-GEA_COMPILER="$(resolve_gea_package @geastack/compiler)"
-GEA_PLUGIN="$(resolve_gea_package @geastack/geatsc-plugin-gea)"
+GEA_COMPILER="$(resolve_collection_package "$(resolve_gea_package @geastack/compiler)" compiler)"
+GEA_PLUGIN="$(resolve_collection_package "$(resolve_gea_package @geastack/geatsc-plugin-gea)" core/packages/geatsc-plugin-gea)"
 [ -n "$GEA_CORE" ] && [ -f "$GEA_CORE/package.json" ] || { echo "Cannot resolve @geastack/core via node_modules — run 'npm install' in $ROOT_DIR" >&2; exit 1; }
 GEA_HOST_DIR="${GEA_HOST_DIR:-$GEA_CORE/../host}"
 GEA_ENGINE_DIR="${GEA_ENGINE_DIR:-$GEA_CORE/../engine}"
@@ -195,7 +206,7 @@ source "$ROOT_DIR/targets/macos/heavy-build-lock.sh"
 # Prefer an explicit override, then the local package, then gea on PATH.
 GEA_CLI="${GEA_CLI_BIN:-}"
 if [[ -z "$GEA_CLI" ]]; then
-  GEA_CLI="$(node -e 'process.stdout.write(require("path").join(process.argv[1], "bin", "gea.mjs"))' "$(resolve_gea_package @geastack/cli)" 2>/dev/null || true)"
+  GEA_CLI="$(node -e 'process.stdout.write(require("path").join(process.argv[1], "bin", "gea.mjs"))' "$(resolve_collection_package "$(resolve_gea_package @geastack/cli)" cli)" 2>/dev/null || true)"
   if [[ ! -f "$GEA_CLI" ]]; then
     GEA_CLI="$(command -v gea || true)"
   fi
@@ -219,6 +230,34 @@ fi
 APP_META_CACHE_IDS=("$APP_ID")
 APP_META_CACHE_VALUES=("$APP_META")
 RESOLVED_APP_META="$APP_META"
+
+# --format shell is a fixed four-field line, so the design width comes from the
+# JSON summary. It reaches the runtime through Info.plist (see Info.plist.in):
+# the window size lives in macos.json, but this is a property of the app's
+# stylesheets, not of one window, so it belongs with the bundle metadata. A CLI
+# whose `apps inspect` does not report the field yet falls back to the app's
+# package.json `gea.designWidth`, as build-windows.mjs does.
+#
+# Every step tolerates failure and the result is checked as a number: this
+# used to pass an undefined `--project "$GEA_APPS_ROOT"` (fatal under set -u),
+# the parser still printed its "0", `|| echo 0` appended another, and the
+# bundle shipped `<real>00</real>` -- no design width at all.
+APP_INSPECT_JSON="$(node "$GEA_CLI" apps inspect "$APP_ID" --format json 2>/dev/null || true)"
+APP_DESIGN_WIDTH="$(APP_INSPECT_JSON="$APP_INSPECT_JSON" APP_ROOT_DIR="${_APP_ROOT:-}" node -e '
+const fs = require("fs")
+const path = require("path")
+let width = 0
+try { width = Number(JSON.parse(process.env.APP_INSPECT_JSON).designWidth) || 0 } catch {}
+if (!(width > 0) && process.env.APP_ROOT_DIR) {
+  try { width = Number(JSON.parse(fs.readFileSync(path.join(process.env.APP_ROOT_DIR, "package.json"), "utf8")).gea?.designWidth) || 0 } catch {}
+}
+process.stdout.write(String(width > 0 ? width : 0))
+' 2>/dev/null || true)"
+if [[ "$APP_DESIGN_WIDTH" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk -v width="$APP_DESIGN_WIDTH" 'BEGIN { exit !(width > 0) }'; then
+  DESIGN_WIDTH_KEYS="<key>GeaDesignWidth</key><real>$APP_DESIGN_WIDTH</real>"
+else
+  DESIGN_WIDTH_KEYS=""
+fi
 
 # Build output belongs to the PROJECT being built, never to this package.
 # ROOT_DIR is @geastack/apple's own directory, which for every app that
@@ -369,6 +408,7 @@ INFO_PLIST_TMP="$BUILD_DIR/Info.plist.tmp.$$"
 sed -e "s/@APP_EXEC@/$APP_EXEC/g" \
     -e "s/@APP_ID@/$APP_ID/g" \
     -e "s/@APP_NAME@/$APP_NAME/g" \
+    -e "s|@DESIGN_WIDTH_KEYS@|$DESIGN_WIDTH_KEYS|g" \
     "$ROOT_DIR/targets/macos/Info.plist.in" > "$INFO_PLIST_TMP"
 if replace_content_stable "$APP_BUNDLE/Contents/Info.plist" "$INFO_PLIST_TMP"; then
   BUNDLE_CONTENT_CHANGED=1
