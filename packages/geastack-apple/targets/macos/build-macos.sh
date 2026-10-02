@@ -549,22 +549,12 @@ generate_app() {
       --isolate-symbols
     )
   fi
-  if [[ "${GEA_VITE_MODULE_GRAPH:-0}" == "1" || ( "$id" == "three-angle-metal" && "${GEA_THREE_MODULE_GRAPH:-1}" != "0" ) ]]; then
-    extraArgs+=(--module-graph-out "$outDir/module-graph")
-  fi
-  # One generated C++ unit per source module instead of one for the whole app.
-  # `read_geatsc_sources` already compiles every line of geatsc-sources.txt, so
-  # this only changes how many lines there are; see the compiler's
-  # docs/TRANSLATION-UNITS.md for the measured trade.
-  if [[ "${GEA_PER_FILE_UNITS:-0}" == "1" ]]; then
-    extraArgs+=(--per-file-units)
-  fi
-  if [[ "$id" == "three-angle-metal" && "${GEA_THREE_MODULE_GRAPH_ONLY:-0}" == "1" ]]; then
-    extraArgs+=(--module-graph-only)
-  fi
-  if [[ "$id" == "three-angle-metal" && "${GEA_THREE_MODULE_GRAPH_COMPILE:-1}" != "0" ]]; then
-    extraArgs+=(--compile-module-graph --allow-any)
-  fi
+  local buildConfig="$outDir/gea-build-config.json"
+  mkdir -p "$outDir"
+  node "${GEA_CLI_BIN:?Use gea build --target macos}" config --project "$appDir" --target macos > "$buildConfig"
+  extraArgs+=(--build-config "$buildConfig")
+  local moduleGraphOnly
+  moduleGraphOnly="$(node -e 'console.log(require(process.argv[1]).settings.compiler?.moduleGraph === "only" ? "1" : "0")' "$buildConfig")"
   # `gea build` resolves which compiler plugins this app's packages ship and
   # names them here, so no app needs a stub file re-exporting one. The appDir
   # fallback is for a direct invocation of this script, not a decision.
@@ -582,17 +572,11 @@ generate_app() {
   local envSignatureFile="$outDir/.gea-build-env"
   local compilerFingerprint
   compilerFingerprint="$(node "$ROOT_DIR/targets/macos/compiler-input-fingerprint.mjs" "$GEA_COMPILER")"
-  local envSignature="GEA_THREE_USE_UPSTREAM=${GEA_THREE_USE_UPSTREAM:-}
-GEA_THREE_REFERENCE_DEMO=${GEA_THREE_REFERENCE_DEMO:-}
-GEA_THREE_MODULE_GRAPH=${GEA_THREE_MODULE_GRAPH:-1}
-GEA_VITE_MODULE_GRAPH=${GEA_VITE_MODULE_GRAPH:-0}
-GEA_THREE_MODULE_GRAPH_ONLY=${GEA_THREE_MODULE_GRAPH_ONLY:-0}
-GEA_THREE_MODULE_GRAPH_COMPILE=${GEA_THREE_MODULE_GRAPH_COMPILE:-1}
-GEA_PER_FILE_UNITS=${GEA_PER_FILE_UNITS:-0}
-GEA_CPP_TRANSLATION_UNITS=${GEA_CPP_TRANSLATION_UNITS:-}
+  local envSignature="GEA_BUILD_CONFIG=$(cat "$buildConfig")
 GEA_WEBGL_AUTO_INSTANCE=${GEA_WEBGL_AUTO_INSTANCE:-}
 GEA_WEBGL_AUTO_INSTANCE_TEST=${GEA_WEBGL_AUTO_INSTANCE_TEST:-}
 GEA_COMPILER_FINGERPRINT=${compilerFingerprint}"
+
   # Only when an alternate compiler was named, so the default signature -- and
   # therefore every existing generated directory's freshness -- is unchanged.
   if [[ -n "${GEA_GEATSC_BIN:-}" ]]; then
@@ -635,8 +619,8 @@ GEA_GEATSC_FINGERPRINT=$(tree_fingerprint "$(dirname "$GEA_GEATSC_BIN")")"
         newer="${newer:-env:apple-native-output-inconsistent}"
       fi
     fi
-    if [[ "$id" == "three-angle-metal" && "${GEA_THREE_MODULE_GRAPH_ONLY:-0}" == "1" && ! -f "$outDir/module-graph/gea-module-graph.json" ]]; then
-      newer="${newer:-env:three-module-graph-only}"
+    if [[ "$moduleGraphOnly" == "1" && ! -f "$outDir/module-graph/gea-module-graph.json" ]]; then
+      newer="${newer:-env:module-graph-only}"
     fi
   fi
   if [[ ! -f "$sourceList" || ! -f "$generationSentinel" || -n "$newer" ]]; then
@@ -651,7 +635,7 @@ GEA_GEATSC_FINGERPRINT=$(tree_fingerprint "$(dirname "$GEA_GEATSC_BIN")")"
       --apple-platform macos \
       --geatsc-apple-native-plugin "$GEA_APPLE_NATIVE_PLUGIN/dist/index.js" \
       "${extraArgs[@]+"${extraArgs[@]}"}"; then
-      if [[ "$id" == "three-angle-metal" && "${GEA_THREE_MODULE_GRAPH_ONLY:-0}" == "1" ]]; then
+      if [[ "$moduleGraphOnly" == "1" ]]; then
         echo "Module graph generation failed for '$id'; native generation state is unchanged" >&2
         return 1
       fi
@@ -659,7 +643,7 @@ GEA_GEATSC_FINGERPRINT=$(tree_fingerprint "$(dirname "$GEA_GEATSC_BIN")")"
       echo "C++ generation failed for '$id'; invalidated freshness state" >&2
       return 1
     fi
-    if [[ "$id" == "three-angle-metal" && "${GEA_THREE_MODULE_GRAPH_ONLY:-0}" == "1" ]]; then
+    if [[ "$moduleGraphOnly" == "1" ]]; then
       echo "Generated module graph only for '$id' at $outDir/module-graph"
       exit 0
     fi
@@ -686,7 +670,7 @@ GEA_GEATSC_FINGERPRINT=$(tree_fingerprint "$(dirname "$GEA_GEATSC_BIN")")"
     touch "$generationSentinel"
     generatedNow=1
   fi
-  if [[ "$id" == "three-angle-metal" && "${GEA_THREE_MODULE_GRAPH_ONLY:-0}" == "1" ]]; then
+  if [[ "$moduleGraphOnly" == "1" ]]; then
     echo "Module graph already fresh for '$id' at $outDir/module-graph"
     exit 0
   fi

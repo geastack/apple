@@ -1,6 +1,6 @@
 {
   "name": "@geastack/apple",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "description": "Generated Apple SDK bindings plus the macOS and iOS native build targets for Gea apps.",
   "license": "Apache-2.0",
   "repository": {
@@ -112,12 +112,12 @@
   },
   "dependencies": {
     "@geastack/compiler": "^1.0.18",
-    "@geastack/core": "^0.1.23",
+    "@geastack/core": "^0.1.33",
     "@geastack/elements": "^0.1.2",
     "@geastack/engine": "^0.1.5",
     "@geastack/geaos": "^0.1.3",
     "@geastack/geatsc-plugin-apple-native": "^0.1.4",
-    "@geastack/geatsc-plugin-gea": "^0.1.6",
+    "@geastack/geatsc-plugin-gea": "^0.1.14",
     "@geastack/host": "^0.1.8"
   },
   "scripts": {
