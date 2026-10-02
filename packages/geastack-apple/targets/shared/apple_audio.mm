@@ -1175,6 +1175,9 @@ bool AudioSystem::playPcm(const std::int16_t *samples, std::size_t sample_count,
 }
 
 void AudioSystem::stopPlayback() { Engine::instance().stopPlayback(); }
+// No PCM stream output is queued by this backend (only the ESP32 runtime
+// streams PCM), so a flush has nothing to discard.
+void AudioSystem::flushPlayback() {}
 
 namespace testing {
 
