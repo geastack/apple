@@ -5,9 +5,9 @@
   "private": true,
   "description": "Native Apple build targets (macOS AppKit, iOS) for geastack apps.",
   "dependencies": {
-    "@geastack/compiler": "^1.0.15",
-    "@geastack/core": "^0.1.23",
-    "@geastack/geatsc-plugin-gea": "^0.1.6"
+    "@geastack/compiler": "^1.0.21",
+    "@geastack/core": "^0.1.35",
+    "@geastack/geatsc-plugin-gea": "^0.1.17"
   },
   "scripts": {
     "test": "for f in $(git ls-files | grep -E '(^|/)(test[-_][^/]*|[^/]*\\.test)\\.mjs$'); do echo \"==> $f\"; node \"$f\" || exit 1; done"
