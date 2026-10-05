@@ -56,16 +56,96 @@
 - (void)mouseUp:(NSEvent *)event { [self.nextResponder mouseUp:event]; }
 @end
 
+namespace gea::macos {
+int nodeIdForView(NSView *view);
+NSString *descendantText(const gea::embedded::ui::Node &node);
+}  // namespace gea::macos
+
 // A <button> the stylesheet paints itself (it has a CSS background: weather's
 // chips and pills) is a plain box whose children are laid out and drawn like
 // any other box's — see isStyledButton. It keeps the button semantics in one
 // place: a press anywhere inside it lands on the button, not on the span that
 // happens to be under the pointer, the same target the win32 surface
 // hit-test picks (it never descends into a styled button).
+//
+// To the keyboard and to VoiceOver it stays the button an NSButton would be:
+// it joins the key view loop, Space and Return press it, the focus ring
+// follows its corners, and the accessibility tree sees a button labelled with
+// the text its children show. A plain NSView is none of that, so the chips
+// could not be reached without a mouse.
 @interface GeaStyledButtonView : NSView
 @end
 @implementation GeaStyledButtonView
 - (NSView *)hitTest:(NSPoint)point { return [super hitTest:point] ? self : nil; }
+
+- (int)geaNodeId { return gea::macos::nodeIdForView(self); }
+
+- (BOOL)geaEnabled
+{
+	const int nodeId = [self geaNodeId];
+	auto &tree = gea::embedded::ui::Tree::instance();
+	if (nodeId < 0 || nodeId >= tree.nodeCount()) return NO;
+	return !self.hidden && !tree.hasAttribute(nodeId, "disabled");
+}
+
+- (void)geaPress
+{
+	if ([self geaEnabled]) gea_macos_fire_press_for_node([self geaNodeId]);
+}
+
+- (BOOL)acceptsFirstResponder { return [self geaEnabled]; }
+
+- (BOOL)becomeFirstResponder
+{
+	const BOOL became = [super becomeFirstResponder];
+	if (became) [self setNeedsDisplay:YES];
+	return became;
+}
+
+- (BOOL)resignFirstResponder
+{
+	const BOOL resigned = [super resignFirstResponder];
+	if (resigned) [self setNeedsDisplay:YES];
+	return resigned;
+}
+
+- (void)keyDown:(NSEvent *)event
+{
+	NSString *keys = event.charactersIgnoringModifiers;
+	const unichar key = keys.length > 0 ? [keys characterAtIndex:0] : 0;
+	if (key == ' ' || key == NSCarriageReturnCharacter || key == NSEnterCharacter) {
+		[self geaPress];
+		return;
+	}
+	[super keyDown:event];
+}
+
+// The ring hugs the box, rounded the way applyViewStyle rounded the layer.
+- (void)drawFocusRingMask
+{
+	const CGFloat radius = self.layer.cornerRadius;
+	[[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:radius yRadius:radius] fill];
+}
+
+- (NSRect)focusRingMaskBounds { return self.bounds; }
+
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityButtonRole; }
+- (BOOL)isAccessibilityEnabled { return [self geaEnabled]; }
+
+- (NSString *)accessibilityLabel
+{
+	const int nodeId = [self geaNodeId];
+	auto &tree = gea::embedded::ui::Tree::instance();
+	if (nodeId < 0 || nodeId >= tree.nodeCount()) return @"";
+	return gea::macos::descendantText(tree.node(nodeId));
+}
+
+- (BOOL)accessibilityPerformPress
+{
+	[self geaPress];
+	return YES;
+}
 @end
 
 // Editable text field used to materialize `<input>` JSX elements. Holds the
@@ -261,6 +341,33 @@ int nodeIdForView(NSView *view)
 		view = view.superview;
 	}
 	return -1;
+}
+
+// The words a button shows: every descendant text run in document order,
+// joined with spaces, skipping display:none subtrees. The title of a native
+// button whose label is element children (applyButtonProps), and the
+// accessibility label of a styled one (GeaStyledButtonView), which draws no
+// title at all.
+NSString *descendantText(const gea::embedded::ui::Node &node)
+{
+	using namespace gea::embedded::ui;
+	Tree &tree = Tree::instance();
+	NSMutableArray<NSString *> *parts = [NSMutableArray array];
+	std::vector<int> stack;
+	for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) stack.push_back(child);
+	std::reverse(stack.begin(), stack.end());
+	while (!stack.empty()) {
+		const int id = stack.back();
+		stack.pop_back();
+		if (id < 0 || id >= tree.nodeCount()) continue;
+		const Node &current = tree.node(id);
+		if (current.style.display == kDisplayNone) continue;
+		if (current.type == NodeType::Text && !current.text.empty()) [parts addObject:[NSString stringWithUTF8String:current.text.c_str()] ?: @""];
+		std::vector<int> children;
+		for (int child = current.first_child; child >= 0; child = tree.node(child).next_sibling) children.push_back(child);
+		for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
+	}
+	return [parts componentsJoinedByString:@" "];
 }
 
 // True for the nodes that materialize as an NSScrollView (makeViewForType):
@@ -1721,24 +1828,7 @@ void applyButtonProps(NSButton *btn, const gea::embedded::ui::Node &node, int no
 	// their title vanished entirely. Collect descendant text in document order
 	// instead, joined with spaces. (A CSS-styled button is not an NSButton at
 	// all: see isStyledButton.)
-	if (title.length == 0) {
-		NSMutableArray<NSString *> *parts = [NSMutableArray array];
-		std::vector<int> stack;
-		for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) stack.push_back(child);
-		std::reverse(stack.begin(), stack.end());
-		while (!stack.empty()) {
-			const int id = stack.back();
-			stack.pop_back();
-			const Node &cn = tree.node(id);
-			if (cn.type == NodeType::Text && !cn.text.empty()) {
-				[parts addObject:[NSString stringWithUTF8String:cn.text.c_str()] ?: @""];
-			}
-			std::vector<int> children;
-			for (int child = cn.first_child; child >= 0; child = tree.node(child).next_sibling) children.push_back(child);
-			for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
-		}
-		title = [parts componentsJoinedByString:@" "];
-	}
+	if (title.length == 0) title = descendantText(node);
 
 	if (![btn.title isEqualToString:title]) btn.title = title;
 
