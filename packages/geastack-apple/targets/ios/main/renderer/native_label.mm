@@ -147,8 +147,12 @@ void applyTextProps(GeaNativeLabel *label, const gea::embedded::ui::Node &node, 
 	// Only ever GROWS the line box — see the same note in macOS applyTextProps.
 	// The measurement hook pins min == max so the engine gets the CSS line box;
 	// doing that when drawing clips descenders instead, which CSS never does.
-	if (font && node.style.line_height > 0 && node.style.line_height > font.ascender - font.descender)
-		paragraph.minimumLineHeight = node.style.line_height;
+	// `font` is sized in scaled points, so the CSS line box is scaled the same
+	// way before the two are compared (textPaintFrame does the same). Comparing
+	// the unscaled value gave the label a smaller line box than the one measured
+	// and painted whenever scale != 1, which is every phone.
+	const CGFloat lineBox = static_cast<CGFloat>(node.style.line_height) * scale;
+	if (font && node.style.line_height > 0 && lineBox > font.ascender - font.descender) paragraph.minimumLineHeight = lineBox;
 	NSMutableDictionary *attrs = textAttributes(font, color, node.style.text_decoration);
 	attrs[NSParagraphStyleAttributeName] = paragraph;
 	gea::ios::addSyntheticBold(attrs, node.style.font_id, fontSize, node.style.font_weight);
