@@ -125,6 +125,39 @@ extern "C" void gea_ios_touch_set_state(int touching, int x, int y);
 
 namespace gea::ios::renderer {
 
+namespace {
+
+// The words a button shows: every descendant text run in document order,
+// joined with spaces, skipping display:none subtrees. The same text win32
+// draws as the title of a native button (buttonTitle).
+NSString *buttonAccessibilityLabel(const gea::embedded::ui::Node &node)
+{
+	using gea::embedded::ui::kDisplayNone;
+	using gea::embedded::ui::NodeType;
+	auto &tree = gea::embedded::ui::Tree::instance();
+	std::string text;
+	std::vector<int> stack;
+	for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) stack.push_back(child);
+	std::reverse(stack.begin(), stack.end());
+	while (!stack.empty()) {
+		const int id = stack.back();
+		stack.pop_back();
+		if (id < 0 || id >= tree.nodeCount()) continue;
+		const auto &current = tree.node(id);
+		if (current.style.display == kDisplayNone) continue;
+		if (current.type == NodeType::Text && !current.text.empty()) {
+			if (!text.empty()) text.push_back(' ');
+			text += current.text;
+		}
+		std::vector<int> children;
+		for (int child = current.first_child; child >= 0; child = tree.node(child).next_sibling) children.push_back(child);
+		for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
+	}
+	return NSStringFromText(text);
+}
+
+}  // namespace
+
 void applyButtonProps(GeaNativeButton *button, const gea::embedded::ui::Node &node, int nodeId)
 {
 	button.nodeId = nodeId;
@@ -135,6 +168,12 @@ void applyButtonProps(GeaNativeButton *button, const gea::embedded::ui::Node &no
 	// paints them. Lifting the first text child into a centred title and hiding
 	// every label flattened the button to one string: weather's city chips lost
 	// their temperature, and a child's own size and weight went with it.
+	//
+	// A UIButton is one accessibility element and VoiceOver never reads its
+	// subviews, so without a title it announced an unnamed "button" for every
+	// chip. Spell the children's text out as the label instead.
+	NSString *label = buttonAccessibilityLabel(node);
+	if (![button.accessibilityLabel isEqualToString:label]) button.accessibilityLabel = label;
 }
 
 }  // namespace gea::ios::renderer
