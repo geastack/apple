@@ -47,6 +47,31 @@ static void gea_macos_smoke_log(const char *message)
 	}
 }
 
+// GeaDesignWidth (Info.plist, written by build-macos.sh from the app's
+// gea.designWidth) is the logical CSS width the app's stylesheets were authored
+// against. A window is whatever size the user drags it to, so the ratio follows
+// from the two: the engine multiplies every CSS px by it (ui::cssPixelLength),
+// which scales a fixed-px layout to the window instead of pinning it to the
+// dimensions of the panel the app was drawn for. An app that declares nothing
+// keeps the build's default ratio, exactly as before.
+static double gea_macos_design_width(void)
+{
+	static const double designWidth = []() -> double {
+		id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"GeaDesignWidth"];
+		if (![value respondsToSelector:@selector(doubleValue)]) return 0.0;
+		const double parsed = [value doubleValue];
+		return parsed > 0.0 ? parsed : 0.0;
+	}();
+	return designWidth;
+}
+
+static double gea_macos_device_pixel_ratio(double viewportWidth)
+{
+	const double designWidth = gea_macos_design_width();
+	if (designWidth <= 0.0 || viewportWidth <= 0.0) return GEA_EMBEDDED_CSS_DEVICE_PIXEL_RATIO;
+	return viewportWidth / designWidth;
+}
+
 // Apple-native apps (those importing @geajs/apple/*) make geatsc emit this
 // handle-table bridge header plus Objective-C++ app modules. When present, this
 // file is built in apple-native mode: __gea_top_level (run from Application::init)
@@ -64,6 +89,12 @@ static void gea_macos_smoke_log(const char *message)
 // Override to keep the default AppKit y-flip semantics (origin bottom-left).
 // MacosRenderer::applyViewStyle does its own coordinate flipping.
 - (BOOL)isFlipped { return NO; }
+// Plain node views pass the wheel up to here; the renderer pans the sideways
+// rail under the cursor with it.
+- (void)scrollWheel:(NSEvent *)event
+{
+	if (!gea::macos::MacosRenderer::instance().scrollWheel(self, event)) [super scrollWheel:event];
+}
 @end
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -249,7 +280,8 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 		size = NSMakeSize(gea::platform::display::kWidth, gea::platform::display::kHeight);
 	}
 	gea_macos_smoke_log("[gea-macos] before Application::init");
-	gea::framework::app::Application::init(static_cast<int>(size.width), static_cast<int>(size.height));
+	gea::framework::app::Application::init(static_cast<int>(size.width), static_cast<int>(size.height),
+	                                       gea_macos_device_pixel_ratio(size.width));
 	gea_macos_smoke_log("[gea-macos] after Application::init");
 
 	// If the app's mounted root is a <glass-split>, swap the flat content view
@@ -396,7 +428,8 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 				// LaunchSurface). The scan below restarts them for the new app.
 				gea::css::AnimationEngine::instance().clear();
 				gea::framework::app::Application::init(static_cast<int>(sz.width),
-				                                       static_cast<int>(sz.height));
+				                                       static_cast<int>(sz.height),
+				                                       gea_macos_device_pixel_ratio(sz.width));
 			}
 		}
 	}
@@ -466,6 +499,23 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	NSSize size = self.rootView.bounds.size;
 	const int w = static_cast<int>(size.width);
 	const int h = static_cast<int>(size.height);
+	// Republish the viewport whenever the window changes size. Forcing the root
+	// node's width/height below is not enough on its own: vw/vh lengths and
+	// @media conditions resolve against the metrics the engine holds, so without
+	// this they stay frozen at the size the window had on launch. This also
+	// re-derives the design-width ratio, which is what makes a fixed-px layout
+	// track a resize. setViewportMetrics recomputes class styles itself, so only
+	// call it when something actually moved.
+	{
+		static int lastViewportWidth = -1;
+		static int lastViewportHeight = -1;
+		if (w > 0 && h > 0 && (w != lastViewportWidth || h != lastViewportHeight)) {
+			lastViewportWidth = w;
+			lastViewportHeight = h;
+			gea::embedded::ui::Document::setPreferredMountSize(w, h);
+			gea::embedded::ui::setViewportMetrics(w, h, gea_macos_device_pixel_ratio(size.width));
+		}
+	}
 	// macOS target convention: the mounted root view fills the window. This
 	// gives apps a viewport that tracks resize without per-app code; if an
 	// app wants different sizing it puts a sized child inside the root.
@@ -502,10 +552,21 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 			using gea::embedded::ui::NodeType;
 			for (int i = 0; i < tree.nodeCount(); i++) {
 				const auto &n = tree.node(i);
-				NSLog(@"  node[%d] t=%d xy=(%d,%d) wh=(%dx%d)%s",
-				      i, (int)n.type,
+				const std::string cls = tree.className(i);
+				NSLog(@"  node[%d] parent=%d t=%d class=\"%s\" xy=(%d,%d) wh=(%dx%d) "
+				       "w=%d w%%=%d minw=%d maxw=%d flex=%d basis=%d shrink=%d disp=%d dir=%d/%d "
+				       "ws=%d fs=%d lh=%d pad=(%d,%d,%d,%d)%s",
+				      i, (int)n.parent, (int)n.type, cls.c_str(),
 				      (int)n.layout.x, (int)n.layout.y,
 				      (int)n.layout.width, (int)n.layout.height,
+				      (int)n.style.width, (int)n.style.width_percent,
+				      (int)n.style.min_width, (int)n.style.max_width,
+				      (int)n.style.flex, (int)n.style.flex_basis, (int)n.style.flex_shrink,
+				      (int)n.style.display, (int)n.style.flex_direction,
+				      (int)n.style.flex_direction_explicit, (int)n.style.white_space,
+				      (int)n.style.font_size, (int)n.style.line_height,
+				      (int)n.style.padding[0], (int)n.style.padding[1],
+				      (int)n.style.padding[2], (int)n.style.padding[3],
 				      n.type == NodeType::Text && !n.text.empty() ? n.text.c_str() : "");
 			}
 			[self walkAndLogSubviews:self.rootView indent:@"  "];

@@ -3,6 +3,7 @@
 
 #include "font_registry.h"
 #include "graphics/font.h"
+#include "ui/style.h"
 
 #include <algorithm>
 #include <cctype>
@@ -128,37 +129,132 @@ const std::uint8_t *runtimeTtfBytesForFamilyId(int familyId, unsigned long *leng
 	return it->second.data();
 }
 
-static NSFont *self_resolveFont(int fontId, CGFloat size);
+static NSFont *self_resolveFont(int fontId, CGFloat size, int weight);
 
-NSFont *fontForId(int fontId, int sizePx)
+namespace {
+
+// CSS font-weight → CoreText's normalised weight trait (the NSFontWeight*
+// constants: 400 Regular = 0, 600 Semibold = 0.3, 700 Bold = 0.4, ...).
+CGFloat coreTextWeightForCss(int weight)
 {
-	CGFloat size = sizePx > 0 ? static_cast<CGFloat>(sizePx) : [NSFont systemFontSize];
-
-	// Cache resolved fonts by (fontId, size). `+[NSFont fontWithName:size:]` and
-	// the CTFontDescriptor fallback below both do a CoreText font-descriptor
-	// match, which is expensive — and this is called for EVERY text node on
-	// EVERY frame (renderer sync + layout measurement). Without this cache,
-	// CoreText font matching dominated the profile and pegged a CPU core. The
-	// set of (family, size) pairs an app uses is tiny, so the cache stays small.
-	static NSMutableDictionary<NSNumber *, NSFont *> *cache;
-	static dispatch_once_t once;
-	dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
-	NSNumber *key = @(static_cast<long long>(fontId) * 100000LL + llround(size));
-	@synchronized(cache) {
-		NSFont *hit = cache[key];
-		if (hit) return hit;
-	}
-	NSFont *resolved = self_resolveFont(fontId, size);
-	if (resolved) {
-		@synchronized(cache) { cache[key] = resolved; }
-	}
-	return resolved;
+	if (weight <= 100) return NSFontWeightUltraLight;
+	if (weight <= 200) return NSFontWeightThin;
+	if (weight <= 300) return NSFontWeightLight;
+	if (weight <= 400) return NSFontWeightRegular;
+	if (weight <= 500) return NSFontWeightMedium;
+	if (weight <= 600) return NSFontWeightSemibold;
+	if (weight <= 700) return NSFontWeightBold;
+	if (weight <= 800) return NSFontWeightHeavy;
+	return NSFontWeightBlack;
 }
 
-static NSFont *self_resolveFont(int fontId, CGFloat size)
+CGFloat weightTraitOf(NSFont *font)
+{
+	NSDictionary *traits = (__bridge_transfer NSDictionary *)CTFontCopyTraits((__bridge CTFontRef)font);
+	return [traits[(__bridge NSString *)kCTFontWeightTrait] doubleValue];
+}
+
+// Between Medium (0.23) and Semibold (0.3): CSS's bold threshold is 600.
+constexpr CGFloat kBoldWeightTrait = 0.26;
+
+bool isBoldWeight(int weight) { return weight >= 600; }
+
+// The face of `base`'s family closest to the CSS weight, or `base` when the
+// family has nothing nearer. A CSS bold (>= 600) that CoreText resolves to a
+// lighter face (Helvetica Neue has Medium but no Semibold) takes the family's
+// bold face instead, the way the CSS matching algorithm looks heavier first.
+NSFont *faceForWeight(NSFont *base, CGFloat size, int weight)
+{
+	if (!base || weight <= 0 || weight == 400) return base;
+	NSDictionary *attrs = @{
+		(__bridge NSString *)kCTFontFamilyNameAttribute: base.familyName ?: @"",
+		(__bridge NSString *)kCTFontTraitsAttribute: @{(__bridge NSString *)kCTFontWeightTrait: @(coreTextWeightForCss(weight))},
+	};
+	CTFontDescriptorRef wanted = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attrs);
+	NSSet *mandatory = [NSSet setWithObject:(__bridge NSString *)kCTFontFamilyNameAttribute];
+	CTFontDescriptorRef matched = CTFontDescriptorCreateMatchingFontDescriptor(wanted, (__bridge CFSetRef)mandatory);
+	CFRelease(wanted);
+	NSFont *face = base;
+	if (matched) {
+		face = (__bridge_transfer NSFont *)CTFontCreateWithFontDescriptor(matched, size, NULL) ?: base;
+		CFRelease(matched);
+	}
+	if (isBoldWeight(weight) && weightTraitOf(face) < kBoldWeightTrait) {
+		CTFontRef bold = CTFontCreateCopyWithSymbolicTraits((__bridge CTFontRef)base, size, NULL, kCTFontTraitBold, kCTFontTraitBold);
+		if (bold) face = (__bridge_transfer NSFont *)bold;
+	}
+	return face;
+}
+
+// Skia's fake-bold outset (SkScalerContext kStdFakeBoldInterp*), which is what
+// Chrome paints a CSS bold with when the family ships no bold face: the outline
+// is stroked and filled with a pen of size * k, k running from 1/24 at 9px to
+// 1/32 at 36px. The advances stay those of the regular face.
+CGFloat fakeBoldPenScale(CGFloat cssSize)
+{
+	const CGFloat t = std::clamp((cssSize - 9.0) / (36.0 - 9.0), 0.0, 1.0);
+	return 1.0 / 24.0 + t * (1.0 / 32.0 - 1.0 / 24.0);
+}
+
+struct ResolvedFace {
+	NSFont *font = nil;
+	CGFloat syntheticBoldStroke = 0;  // NSStrokeWidthAttributeName, 0 = a real face
+};
+
+const ResolvedFace &resolveFace(int fontId, int sizePx, int weight)
+{
+	CGFloat size = sizePx > 0 ? static_cast<CGFloat>(sizePx) : [NSFont systemFontSize];
+	const int cssWeight = weight > 0 ? std::min(weight, 1000) : 400;  // 0 = unset = normal
+
+	// Cache resolved fonts by (fontId, size, weight). `+[NSFont fontWithName:size:]`
+	// and the CTFontDescriptor matches below are expensive — and this is called
+	// for EVERY text node on EVERY frame (renderer sync + layout measurement).
+	// Without this cache, CoreText font matching dominated the profile and pegged
+	// a CPU core. The set of (family, size, weight) an app uses is tiny, so the
+	// cache stays small.
+	static std::mutex lock;
+	static std::unordered_map<long long, ResolvedFace> cache;
+	const long long key = (static_cast<long long>(fontId + 1) * 1001LL + cssWeight) * 100000LL + llround(size);
+	std::scoped_lock guard(lock);
+	auto it = cache.find(key);
+	if (it != cache.end()) return it->second;
+	ResolvedFace face;
+	face.font = self_resolveFont(fontId, size, cssWeight);
+	// A bold the family has no face for is synthesised, as a browser does: the
+	// regular outlines stroked in their own colour (a negative stroke width is
+	// stroke AND fill). Weather ships Oswald Regular alone; without this every
+	// 600/700 label painted regular.
+	if (face.font && isBoldWeight(cssWeight) && weightTraitOf(face.font) < kBoldWeightTrait) {
+		const double ratio = gea::embedded::ui::devicePixelRatio();
+		const CGFloat cssSize = ratio > 0 ? size / ratio : size;
+		face.syntheticBoldStroke = -100.0 * fakeBoldPenScale(cssSize);
+	}
+	return cache.emplace(key, face).first->second;
+}
+
+}  // namespace
+
+NSFont *fontForId(int fontId, int sizePx, int weight)
+{
+	return resolveFace(fontId, sizePx, weight).font;
+}
+
+CGFloat syntheticBoldStrokeWidth(int fontId, int sizePx, int weight)
+{
+	return resolveFace(fontId, sizePx, weight).syntheticBoldStroke;
+}
+
+void addSyntheticBold(NSMutableDictionary *attrs, int fontId, int sizePx, int weight)
+{
+	const CGFloat stroke = syntheticBoldStrokeWidth(fontId, sizePx, weight);
+	// No stroke colour: AppKit strokes in the foreground colour, alpha included.
+	if (stroke != 0) attrs[NSStrokeWidthAttributeName] = @(stroke);
+}
+
+static NSFont *self_resolveFont(int fontId, CGFloat size, int weight)
 {
 	NSString *family = familyForId(fontId);
-	if (!family || family.length == 0) return [NSFont systemFontOfSize:size];
+	if (!family || family.length == 0) return [NSFont systemFontOfSize:size weight:coreTextWeightForCss(weight)];
 	// CSS system-font keywords map to the actual system UI font — San Francisco
 	// on macOS. There is no PostScript face literally named "-apple-system", so
 	// `+[NSFont fontWithName:@"-apple-system"]` returns nil and we'd otherwise
@@ -168,10 +264,10 @@ static NSFont *self_resolveFont(int fontId, CGFloat size)
 	    [lower isEqualToString:@"blinkmacsystemfont"] || [lower hasPrefix:@".applesystemuifont"] ||
 	    [lower hasPrefix:@".sf"] || [lower isEqualToString:@"san francisco"] ||
 	    [lower isEqualToString:@"sf pro"] || [lower isEqualToString:@"sf pro text"]) {
-		return [NSFont systemFontOfSize:size];
+		return [NSFont systemFontOfSize:size weight:coreTextWeightForCss(weight)];
 	}
 	NSFont *font = [NSFont fontWithName:family size:size];
-	if (font) return font;
+	if (font) return faceForWeight(font, size, weight);
 	// CTFont's family lookup is more forgiving than NSFont's PostScript-name
 	// lookup — fall back to building a CTFont with the family attribute.
 	NSDictionary *attrs = @{
@@ -183,9 +279,9 @@ static NSFont *self_resolveFont(int fontId, CGFloat size)
 	CFRelease(desc);
 	if (ct) {
 		NSFont *resolved = (__bridge_transfer NSFont *)ct;
-		return resolved;
+		return faceForWeight(resolved, size, weight);
 	}
-	return [NSFont systemFontOfSize:size];
+	return [NSFont systemFontOfSize:size weight:coreTextWeightForCss(weight)];
 }
 
 int registerCustomTtfDirectory(NSString *directoryPath)
@@ -274,12 +370,17 @@ NSLineBreakMode lineBreakModeForText(NSString *text, NSFont *font, CGFloat maxWi
 // Host text-measurement hook for the AppKit renderer. The Thermalright target
 // has no AppKit text renderer; it wants the framework's generated-font metrics.
 #if !GEA_MACOS_THERMALRIGHT_DISPLAY_TARGET
-extern "C" bool gea_host_measure_text(const char *text,
-                                      int maxWidth,
-                                      int fontId,
-                                      int fontSize,
-                                      int *outWidth,
-                                      int *outHeight)
+// The engine offers three hooks and takes the first that answers; this one
+// carries the font-weight the other two drop, so a 600 label is measured in the
+// face (or the synthesised bold) the renderer paints it with.
+extern "C" bool gea_host_measure_text_with_style(const char *text,
+                                                 int maxWidth,
+                                                 int fontId,
+                                                 int fontSize,
+                                                 int fontWeight,
+                                                 int lineHeight,
+                                                 int *outWidth,
+                                                 int *outHeight)
 {
 	if (!outWidth || !outHeight) return false;
 	if (!text || !text[0]) {
@@ -288,15 +389,16 @@ extern "C" bool gea_host_measure_text(const char *text,
 		return true;
 	}
 
-	// Memoize by (text, maxWidth, fontId, fontSize): the layout engine re-measures
-	// EVERY text node on EVERY layout pass, and a pass now runs on every
-	// interaction. NSTextFieldCell.cellSizeForBounds:/sizeWithAttributes:
-	// dominated the interaction profile; the inputs fully determine the result,
-	// so a cache turns repeat measurements (the stable note list) into O(1).
+	// Memoize by (text, maxWidth, fontId, fontSize, fontWeight, lineHeight): the
+	// layout engine re-measures EVERY text node on EVERY layout pass, and a pass
+	// now runs on every interaction. NSTextFieldCell.cellSizeForBounds:/
+	// sizeWithAttributes: dominated the interaction profile; the inputs fully
+	// determine the result, so a cache turns repeat measurements (the stable note
+	// list) into O(1).
 	static std::mutex measureLock;
 	static std::unordered_map<std::string, std::pair<int, int>> measureCache;
 	std::string key;
-	key.reserve(std::strlen(text) + 24);
+	key.reserve(std::strlen(text) + 32);
 	key.append(text);
 	key.push_back('\x1f');
 	key.append(std::to_string(maxWidth));
@@ -304,6 +406,10 @@ extern "C" bool gea_host_measure_text(const char *text,
 	key.append(std::to_string(fontId));
 	key.push_back('\x1f');
 	key.append(std::to_string(fontSize));
+	key.push_back('\x1f');
+	key.append(std::to_string(fontWeight));
+	key.push_back('\x1f');
+	key.append(std::to_string(lineHeight));
 	{
 		std::scoped_lock guard(measureLock);
 		auto it = measureCache.find(key);
@@ -314,16 +420,26 @@ extern "C" bool gea_host_measure_text(const char *text,
 		}
 	}
 
-	NSFont *font = gea::macos::fontForId(fontId, fontSize);
+	NSFont *font = gea::macos::fontForId(fontId, fontSize, fontWeight);
 	if (!font) return false;
 	NSString *str = [NSString stringWithUTF8String:text] ?: @"";
 	const CGFloat boundedMax = maxWidth > 0 ? maxWidth : CGFLOAT_MAX;
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	paragraph.lineBreakMode = gea::macos::lineBreakModeForText(str, font, boundedMax);
-	NSDictionary *attrs = @{
+	// CSS `line-height` sets the LINE BOX height, which is what the engine stacks
+	// text rows with. Without it AppKit reports the font's own default leading and
+	// every text node measures taller than the stylesheet says — weather's hour
+	// cells came out 46% too tall and overflowed the forecast box. Pinning min ==
+	// max makes the cell report lines * lineHeight, which is the CSS box.
+	if (lineHeight > 0) {
+		paragraph.minimumLineHeight = lineHeight;
+		paragraph.maximumLineHeight = lineHeight;
+	}
+	NSMutableDictionary *attrs = [@{
 		NSFontAttributeName: font,
 		NSParagraphStyleAttributeName: paragraph,
-	};
+	} mutableCopy];
+	gea::macos::addSyntheticBold(attrs, fontId, fontSize, fontWeight);
 	NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:str attributes:attrs];
 	// Use an actual NSTextFieldCell to measure: this is exactly what the
 	// renderer's NSTextField uses to lay text out, so the size we report
@@ -331,14 +447,21 @@ extern "C" bool gea_host_measure_text(const char *text,
 	// no kerning surprise, no device-metrics vs typographic gap. Sizing
 	// against a fresh cell of size (maxWidth, large) returns the wrapped
 	// height + the actual line width AppKit needs.
+	//
+	// Less the cell's side insets (kLabelSideInset): they are not part of the
+	// CSS text box, and reporting them made every label 4pt wider than a
+	// browser's — weather's "Lisbon 22°" chip grew a gap between its two runs.
+	// The cell is offered the insets on top of maxWidth so it still wraps at
+	// maxWidth; the renderer's field gets them back (applyViewStyle).
+	const CGFloat insets = 2 * gea::macos::kLabelSideInset;
 	NSTextFieldCell *cell = [[NSTextFieldCell alloc] init];
 	cell.bezeled = NO;
 	cell.bordered = NO;
 	cell.drawsBackground = NO;
 	cell.wraps = YES;
 	cell.attributedStringValue = attributed;
-	const NSSize cellSize = [cell cellSizeForBounds:NSMakeRect(0, 0, boundedMax, CGFLOAT_MAX)];
-	*outWidth = static_cast<int>(std::ceil(cellSize.width));
+	const NSSize cellSize = [cell cellSizeForBounds:NSMakeRect(0, 0, maxWidth > 0 ? boundedMax + insets : CGFLOAT_MAX, CGFLOAT_MAX)];
+	*outWidth = std::max(0, static_cast<int>(std::ceil(cellSize.width - insets)));
 	*outHeight = static_cast<int>(std::ceil(cellSize.height));
 	{
 		std::scoped_lock guard(measureLock);
@@ -346,5 +469,16 @@ extern "C" bool gea_host_measure_text(const char *text,
 		measureCache.emplace(std::move(key), std::make_pair(*outWidth, *outHeight));
 	}
 	return true;
+}
+
+extern "C" bool gea_host_measure_text_with_line_height(const char *text,
+                                                       int maxWidth,
+                                                       int fontId,
+                                                       int fontSize,
+                                                       int lineHeight,
+                                                       int *outWidth,
+                                                       int *outHeight)
+{
+	return gea_host_measure_text_with_style(text, maxWidth, fontId, fontSize, 400, lineHeight, outWidth, outHeight);
 }
 #endif

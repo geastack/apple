@@ -66,13 +66,31 @@ fs.mkdirSync(path.join(projectPath, 'project.xcworkspace'), { recursive: true })
 fs.mkdirSync(path.join(projectPath, 'xcshareddata/xcschemes'), { recursive: true })
 if (!skipAppIcon) gea(['apps', 'apple-icons', appId, '--platform', 'ios', '--assets-dir', appIconAssetsDir])
 
+// gea.designWidth is the logical CSS width the app's stylesheets were authored
+// against; ios_main.mm turns it into the device pixel ratio for this screen. It
+// rides Info.plist because it is a property of the bundled app, and each app gets
+// its own bundle.
+// A CLI whose `apps inspect` does not report the field yet leaves it to the
+// app's own package.json, as build-windows.mjs reads it.
+let designWidth = Number(appMeta.designWidth) > 0 ? Number(appMeta.designWidth) : 0
+if (!(designWidth > 0) && appRoot) {
+  try {
+    designWidth = Number(JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8')).gea?.designWidth ?? 0)
+  } catch {
+    designWidth = 0
+  }
+  if (!(designWidth > 0)) designWidth = 0
+}
+const designWidthKeys = designWidth > 0 ? `<key>GeaDesignWidth</key><real>${designWidth}</real>` : ''
+
 const plistTemplate = fs.readFileSync(path.join(iosDir, 'Info.plist.in'), 'utf8')
 fs.writeFileSync(
   plistOut,
   plistTemplate
     .replaceAll('@APP_EXEC@', appName)
     .replaceAll('@APP_NAME@', appName)
-    .replaceAll('@BUNDLE_ID@', bundleId),
+    .replaceAll('@BUNDLE_ID@', bundleId)
+    .replaceAll('@DESIGN_WIDTH_KEYS@', designWidthKeys),
 )
 
 function id(label) {
@@ -168,6 +186,7 @@ const sources = [
   source(path.join(iosDir, 'main/font_registry.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/press_bridge.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_display.mm'), 'sourcecode.cpp.objcpp'),
+  source(path.join(iosDir, 'main/ios_network.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_timers.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_app_platform.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_memory.cpp')),
@@ -214,6 +233,8 @@ const frameworks = [
   'CoreVideo.framework',
   'ImageIO.framework',
   'MapKit.framework',
+  // ios_network.mm: NSURLSession for fetch, NWPathMonitor for the WiFi facade.
+  'Network.framework',
   'AVFoundation.framework',
   'Photos.framework',
   'Security.framework',
