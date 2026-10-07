@@ -55,7 +55,7 @@ void ${prefix}_frame(int timestamp_ms)
 \t{
 \t\tgea::CycleCollectionDeferral deferCycleCollection;
 \t\tgea::framework::app::generated::${prefix}::drainMicrotasks();
-\t\tgea::host::runAnimationFrameCallbacks(static_cast<double>(timestamp_ms));
+\t\tgea::host::runAnimationFrameCallbacks(timestamp_ms);
 \t\tgea::host::websocket::runCallbacks();
 \t\tgea::host::rtc::runCallbacks();
 \t\tgea::embedded::ui::Document::instance().frame(timestamp_ms);
