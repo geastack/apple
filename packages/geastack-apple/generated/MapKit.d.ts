@@ -7,6 +7,7 @@ export declare const MKMapTypeSatellite: number
 export declare const MKUserTrackingModeNone: number
 export declare const MKUserTrackingModeFollow: number
 
+/** @gea-host-no-property-writes */
 export declare function MKCoordinateRegionMakeWithDistance(centerCoordinate: CLLocationCoordinate2D, latitudinalMeters: number, longitudinalMeters: number): MKCoordinateRegion
 
 export interface MKCoordinateSpan {

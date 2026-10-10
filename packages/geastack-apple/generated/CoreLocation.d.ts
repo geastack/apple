@@ -5,6 +5,7 @@ export declare const CLDistanceFilterNone: number
 export declare const CLAuthorizationStatusNotDetermined: number
 export declare const CLAuthorizationStatusAuthorizedWhenInUse: number
 
+/** @gea-host-no-property-writes */
 export declare function CLLocationCoordinate2DMake(latitude: number, longitude: number): CLLocationCoordinate2D
 
 export interface CLLocationCoordinate2D {

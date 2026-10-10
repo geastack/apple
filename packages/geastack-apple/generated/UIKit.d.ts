@@ -17,6 +17,7 @@ export declare const UIControlEventTouchCancel: number
 export declare const UIControlEventValueChanged: number
 export declare const ObjCTargetAction: Selector
 
+/** @gea-host-no-property-writes */
 export declare function installRootView(view: UIView): void
 
 export declare class UIColor extends NSObject {

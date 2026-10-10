@@ -2633,6 +2633,13 @@ function declarationForFramework(framework: AppleFrameworkDefinition): string {
   }
   if ((framework.constants ?? []).length > 0) lines.push('')
   for (const fn of framework.functions ?? []) {
+    // Every framework function is a native bridge: its arguments cross as
+    // native carriers, so it cannot write, define or delete a property on any
+    // script object. Without the contract, geatsc's global mutation census
+    // reads each call as able to rewrite every intrinsic its arguments reach
+    // (an `NSView` reaches `Object` through `.constructor`), which revokes the
+    // stock `Object.assign` for the whole program.
+    lines.push('/** @gea-host-no-property-writes */')
     lines.push(`export declare function ${fn.name}(${parametersSignature(fn.parameters ?? [], framework.name)}): ${typeScriptType(fn.returns, framework.name)}`)
   }
   if ((framework.functions ?? []).length > 0) lines.push('')

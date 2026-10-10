@@ -153,7 +153,7 @@ resolve_gea_package() {
     fi
   done
 }
-GEA_CORE="$(resolve_gea_package @geastack/core)"
+GEA_CORE="${GEA_CORE:-$(resolve_gea_package @geastack/core)}"
 GEA_APPLE_NATIVE_PLUGIN="$(resolve_gea_package @geastack/geatsc-plugin-apple-native)"
 # An app that installs @geastack/apple gets the plugin from node_modules; inside
 # this repository it is a sibling package that nothing links, so name it there.
@@ -161,8 +161,8 @@ if [[ -z "$GEA_APPLE_NATIVE_PLUGIN" && -d "$ROOT_DIR/../geatsc-plugin-apple-nati
   GEA_APPLE_NATIVE_PLUGIN="$(cd "$ROOT_DIR/../geatsc-plugin-apple-native" && pwd)"
 fi
 [ -n "$GEA_APPLE_NATIVE_PLUGIN" ] && [ -f "$GEA_APPLE_NATIVE_PLUGIN/dist/index.js" ] || { echo "Cannot resolve @geastack/geatsc-plugin-apple-native" >&2; exit 1; }
-GEA_COMPILER="$(resolve_gea_package @geastack/compiler)"
-GEA_PLUGIN="$(resolve_gea_package @geastack/geatsc-plugin-gea)"
+GEA_COMPILER="${GEA_COMPILER:-$(resolve_gea_package @geastack/compiler)}"
+GEA_PLUGIN="${GEA_PLUGIN:-$(resolve_gea_package @geastack/geatsc-plugin-gea)}"
 [ -n "$GEA_CORE" ] && [ -f "$GEA_CORE/package.json" ] || { echo "Cannot resolve @geastack/core via node_modules — run 'npm install' in $ROOT_DIR" >&2; exit 1; }
 GEA_HOST_DIR="${GEA_HOST_DIR:-$GEA_CORE/../host}"
 GEA_ENGINE_DIR="${GEA_ENGINE_DIR:-$GEA_CORE/../engine}"
@@ -551,7 +551,12 @@ generate_app() {
   fi
   local buildConfig="$outDir/gea-build-config.json"
   mkdir -p "$outDir"
-  node "${GEA_CLI_BIN:?Use gea build --target macos}" config --project "$appDir" --target macos > "$buildConfig"
+  local debugConfigArgs=()
+  [[ "${GEA_NATIVE_DEBUGGER:-0}" != "1" ]] || debugConfigArgs+=(--debug)
+  if ! node "${GEA_CLI_BIN:?Use gea build --target macos}" config --project "$appDir" --target macos "${debugConfigArgs[@]+"${debugConfigArgs[@]}"}" > "$buildConfig"; then
+    echo "Cannot resolve macOS build configuration for '$id'" >&2
+    return 1
+  fi
   extraArgs+=(--build-config "$buildConfig")
   local moduleGraphOnly
   moduleGraphOnly="$(node -e 'console.log(require(process.argv[1]).settings.compiler?.moduleGraph === "only" ? "1" : "0")' "$buildConfig")"
@@ -589,6 +594,17 @@ GEA_GEATSC_FINGERPRINT=$(tree_fingerprint "$(dirname "$GEA_GEATSC_BIN")")"
   local generationSentinel="$outDir/.gea-generation.stamp"
   local appleStateFile="$outDir/.gea-current-apple-native"
   local moduleGraphFile="$outDir/module-graph/gea-module-graph.json"
+  # Explicit native-only iteration uses the last generated snapshot. Do not
+  # update freshness stamps: a normal build must still regenerate changed TS.
+  if [[ "${GEA_MACOS_REUSE_GENERATED:-0}" == "1" ]]; then
+    [[ -s "$sourceList" ]] || { echo "No generated C++ snapshot for '$id'" >&2; return 1; }
+    local snapshotSource
+    while IFS= read -r snapshotSource; do
+      [[ -s "$snapshotSource" ]] || { echo "Missing generated source: $snapshotSource" >&2; return 1; }
+    done < <(read_geatsc_sources "$outDir")
+    echo "Reusing generated C++ snapshot for '$id' (native-only rebuild)"
+    return 0
+  fi
   if [[ -f "$sourceList" && -f "$generationSentinel" ]]; then
     local generationInputDirs=()
     # Every plugin that feeds generation is a generation input: an edit to one
@@ -848,6 +864,10 @@ fi
 
 CXX_DEFINES=(
   -DGEA_EMBEDDED_ENABLE_VIRTUAL_KEYBOARD=0
+  # Desktop screens exceed the embedded default of 512 nodes. Apply the
+  # capacity consistently to generated app code and every framework TU.
+  -DGEA_EMBEDDED_MAX_NODES=8192
+  -DGEA_EMBEDDED_MAX_IMAGES=8192
   # Canvas ctx.fillText glyphs: rasterize at runtime from the bundle's
   # Resources/Fonts TTFs (font_registry.mm's lookupRuntimeTtfFontForFamily).
   # Windowed builds link no baked font atlas, so without this canvas text
@@ -856,6 +876,40 @@ CXX_DEFINES=(
   # registered TTF bytes there, and falls through.
   -DGEA_EMBEDDED_TTF_RUNTIME_FONTS=1
 )
+if [[ "${GEA_NATIVE_DEBUGGER:-0}" == "1" ]]; then
+  [[ -f "${GEA_DEBUGGER_NATIVE_SOURCE:-}" ]] || { echo "GEA_DEBUGGER_NATIVE_SOURCE must name debugger/native/macos.mm" >&2; exit 2; }
+  # Run the same declaration model in the host adapter and native inspector JSC.
+  node --input-type=module - "$GEA_DEBUGGER_NATIVE_SOURCE" "$GENERATED_DIR/gea_debugger_css.h" <<'NODE'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import path from 'node:path'
+const [nativeSource, output] = process.argv.slice(2)
+const source = readFileSync(path.resolve(path.dirname(nativeSource), '../src/css.mjs'), 'utf8')
+const names = [...source.matchAll(/export function (\w+)/g)].map(m => m[1])
+const script = source.replace(/export function /g, 'function ') +
+  '\nglobalThis.__geaCSS = {' + names.join(',') + '};\n'
+const header = 'static const char geaDebuggerCss[] = {' +
+  [...Buffer.from(script)].join(',') + ',0};\n'
+if (!existsSync(output) || readFileSync(output, 'utf8') !== header) writeFileSync(output, header)
+NODE
+  # JSX handlers are delegated to the body; the runtime's listener hook tells
+  # the inspector which element registered each one. Its callers are runtime
+  # helpers of varying depth, so record several frames; the inspector picks
+  # the first one that maps to the app's original source.
+  debuggerHooks="$GENERATED_DIR/gea_debugger_hooks.h"
+  hooksText='#pragma once
+#ifdef __cplusplus
+extern "C" void gea_debugger_note_listener(int node, const char *type, void *const *sites, int count);
+#define GEA_JSX_NODE_LISTENER_HOOK(node, type) do { \
+  _Pragma("clang diagnostic push") _Pragma("clang diagnostic ignored \"-Wframe-address\"") \
+  void *const geaDebuggerSites[] = {__builtin_return_address(1), __builtin_return_address(2), \
+                                    __builtin_return_address(3), __builtin_return_address(4)}; \
+  _Pragma("clang diagnostic pop") \
+  gea_debugger_note_listener((node), (type), geaDebuggerSites, 4); \
+} while (0)
+#endif'
+  [[ -f "$debuggerHooks" && "$(cat "$debuggerHooks")" == "$hooksText" ]] || printf '%s\n' "$hooksText" > "$debuggerHooks"
+  CXX_DEFINES+=(-DGEA_NATIVE_DEBUGGER=1 -include "$debuggerHooks")
+fi
 MACOS_SHARED_RUNTIME_BUILTINS="${GEA_MACOS_SHARED_RUNTIME_BUILTINS:-0}"
 case "$MACOS_SHARED_RUNTIME_BUILTINS" in
   0) ;;
@@ -906,6 +960,9 @@ case "${GEA_MACOS_THERMALRIGHT_PRODUCT_ID:-}" in
     THERMALRIGHT_DEFAULT_PRODUCT_ID="${GEA_MACOS_THERMALRIGHT_PRODUCT_ID}"
     ;;
 esac
+if [[ "$THERMALRIGHT_DISPLAY_TARGET" == "0" ]]; then
+  CXX_DEFINES+=(-DGEA_EMBEDDED_PIXEL_FORMAT=1) # RGBA8888 for AppKit
+fi
 if [[ "$THERMALRIGHT_DISPLAY_TARGET" == "1" ]]; then
   THERMALRIGHT_WIDTH="${GEA_MACOS_THERMALRIGHT_WIDTH:-$THERMALRIGHT_DEFAULT_WIDTH}"
   THERMALRIGHT_HEIGHT="${GEA_MACOS_THERMALRIGHT_HEIGHT:-$THERMALRIGHT_DEFAULT_HEIGHT}"
@@ -1012,6 +1069,10 @@ MM_SOURCES=(
   "$ROOT_DIR/targets/macos/main/macos_host_device_control.mm"
   "$ROOT_DIR/targets/macos/main/macos_network.mm"
 )
+
+if [[ "${GEA_NATIVE_DEBUGGER:-0}" == "1" ]]; then
+  MM_SOURCES+=("$GEA_DEBUGGER_NATIVE_SOURCE")
+fi
 
 if [[ -n "$SINGLE_APP_DIR" ]]; then
   while IFS= read -r native_src; do
@@ -1868,7 +1929,10 @@ timing_mark compile
 # AVFoundation is unconditional: targets/shared/apple_audio.mm (the real audio
 # backend, oscillators + file/PCM playback) is built into every macOS app, not
 # just apple-native ones.
-LINK_FRAMEWORKS=(-framework Cocoa -framework QuartzCore -framework CoreText -framework IOKit -framework ImageIO -framework CoreGraphics -framework SystemConfiguration -framework AVFoundation)
+LINK_FRAMEWORKS=(-framework GameController -framework Cocoa -framework QuartzCore -framework CoreText -framework IOKit -framework ImageIO -framework CoreGraphics -framework SystemConfiguration -framework AVFoundation)
+if [[ "${GEA_NATIVE_DEBUGGER:-0}" == "1" ]]; then
+  LINK_FRAMEWORKS+=(-framework JavaScriptCore)
+fi
 if [[ "$APPLE_NATIVE" == "1" ]]; then
   # The apple-native bridge emits Objective-C++ for every framework in the
   # metadata (UIKit + the iOS-only AVFoundation camera shims are compiled out

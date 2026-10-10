@@ -1,5 +1,10 @@
 #import <Cocoa/Cocoa.h>
+#import <GameController/GameController.h>
 #import <QuartzCore/CADisplayLink.h>
+
+#if defined(GEA_NATIVE_DEBUGGER) && GEA_NATIVE_DEBUGGER
+extern void gea_macos_debugger_start();
+#endif
 
 #include "font_registry.h"
 #include "macos_native_shell.h"
@@ -8,12 +13,13 @@
 #include "thermalright_hid_display.h"
 
 namespace gea::macos { void installAppLauncherPlatform(const char *currentAppId); }
-namespace gea::macos { void installWifiDriver(); }
+namespace gea::macos { void installWifiDriver(); int nodeIdForView(NSView *view); }
 
 #include "app.h"
 #include "css/declarative.h"
 #include "css/engine.h"
 #include "display.h"
+#include "platform/file_cache.h"
 #if __has_include("resident_apps.h")
 #include "resident_apps.h"
 #define GEA_MACOS_HAS_RESIDENT_APPS 1
@@ -57,13 +63,213 @@ static void gea_macos_smoke_log(const char *message)
 #define GEA_MACOS_HAS_APPLE_NATIVE_BRIDGE 1
 #endif
 
-@interface GeaContentView : NSView
+// App-owned controls consume ordinary Gea events. AppKit supplies only the
+// window and text services, including keyboard layout and IME composition.
+static int geaCustomInputRoot()
+{
+ auto &tree = gea::embedded::ui::Tree::instance();
+ for (int i=0;i<tree.nodeCount();++i)
+  if (std::strcmp(tree.getAttribute(i,"data-gea-inputs"),"true")==0) return i;
+ return -1;
+}
+// Authored silhouettes own their press layer; a rectangular engine fill would
+// paint outside their transparent corners. Ancestors cover image/text hits.
+static bool geaOwnsContourPress(int x, int y) {
+ auto &tree=gea::embedded::ui::Tree::instance();
+ for (int id=tree.hitTestNode(x,y);id>=0;id=tree.node(id).parent)
+  if (std::strcmp(tree.getAttribute(id,"data-gea-contour"),"true")==0) return true;
+ return false;
+}
+@interface GeaContentView : NSView <NSTextInputClient>
+@property(nonatomic,copy) NSAttributedString *geaMarkedText;
+@property(nonatomic,strong) GCController *geaActiveController;
+@property(nonatomic) unsigned int geaGamepadButtons;
+@property(nonatomic) NSTimeInterval geaGamepadRepeat;
+@property(nonatomic,strong) id geaCursorMonitor;
+@property(nonatomic,strong) NSTrackingArea *geaPointerTracking;
 @end
-
 @implementation GeaContentView
-// Override to keep the default AppKit y-flip semantics (origin bottom-left).
-// MacosRenderer::applyViewStyle does its own coordinate flipping.
+// Optional app cursor is scoped to the content bounds; AppKit restores the
+// standard pointer over the title bar, other windows, and other applications.
+- (void)resetCursorRects {
+ [super resetCursorRects];
+ static NSCursor *cursor = nil;
+ static dispatch_once_t once;
+ dispatch_once(&once, ^{
+  NSString *path = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"window.json"];
+  NSData *data = [NSData dataWithContentsOfFile:path];
+  NSDictionary *config = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![config isKindOfClass:[NSDictionary class]]) return;
+  NSDictionary *window = config[@"window"] ?: config;
+  NSDictionary *spec = window[@"cursor"];
+  if (![spec isKindOfClass:[NSDictionary class]] || ![spec[@"style"] isEqual:@"angular"]) return;
+  CGFloat size = [spec[@"size"] respondsToSelector:@selector(doubleValue)] ? [spec[@"size"] doubleValue] : 28;
+  size = std::clamp((double)size, 20.0, 48.0);
+  NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(size, size + 6)];
+  [image lockFocus];
+  NSAffineTransform *transform = [NSAffineTransform transform];
+  [transform translateXBy:0 yBy:size + 6];
+  [transform scaleXBy:size / 28 yBy:-size / 28];
+  [transform concat];
+  NSBezierPath *arrow = [NSBezierPath bezierPath];
+  [arrow moveToPoint:NSMakePoint(2,2)];
+  [arrow lineToPoint:NSMakePoint(23,18)];
+  [arrow lineToPoint:NSMakePoint(12,21)];
+  [arrow lineToPoint:NSMakePoint(3,29)];
+  [arrow closePath];
+  [[NSColor colorWithCalibratedRed:0.04 green:0.12 blue:0.16 alpha:1] setFill];
+  [arrow fill];
+  [[NSColor colorWithCalibratedRed:0.69 green:0.93 blue:0.94 alpha:1] setStroke];
+  arrow.lineWidth = 1.6; [arrow stroke];
+  NSBezierPath *accent = [NSBezierPath bezierPath];
+  [accent moveToPoint:NSMakePoint(5,8)]; [accent lineToPoint:NSMakePoint(16,16)];
+  [[NSColor whiteColor] setStroke]; accent.lineWidth = 1; [accent stroke];
+  [image unlockFocus];
+  cursor = [[NSCursor alloc] initWithImage:image hotSpot:NSMakePoint(2 * size / 28, 2 * size / 28)];
+ });
+ if (cursor) {
+  [self addCursorRect:self.bounds cursor:cursor];
+  if (!self.geaCursorMonitor) {
+   __weak GeaContentView *weakView = self;
+   NSMutableArray<NSCursor *> *frames = [NSMutableArray array];
+   for (int i=0;i<16;i++) {
+    const double t=i/15.0;
+    const double scale=1.0-0.17*std::sin(M_PI*t);
+    NSSize size=cursor.image.size;
+    NSImage *frame=[[NSImage alloc] initWithSize:size];
+    [frame lockFocus];
+    const NSPoint hotspot=cursor.hotSpot;
+    [cursor.image drawInRect:NSMakeRect(hotspot.x*(1-scale),(size.height-hotspot.y)*(1-scale),size.width*scale,size.height*scale) fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+    [frame unlockFocus];
+    [frames addObject:[[NSCursor alloc] initWithImage:frame hotSpot:hotspot]];
+   }
+   self.geaCursorMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskMouseMoved | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp) handler:^NSEvent *(NSEvent *event) {
+    GeaContentView *view=weakView;
+    if (!view || event.window!=view.window) return event;
+    NSPoint point=[view convertPoint:event.locationInWindow fromView:nil];
+    auto &tree=gea::embedded::ui::Tree::instance();
+    const bool inside=NSPointInRect(point,view.bounds);
+    const int x=std::lround(point.x), y=std::lround(view.bounds.size.height-point.y);
+    if (!std::getenv("GEA_MACOS_REPLAY_PLAN") && geaCustomInputRoot()>=0) {
+     tree.pointerHover(inside?x:-1,inside?y:-1);
+     if (event.type==NSEventTypeLeftMouseDown && inside && !geaOwnsContourPress(x,y)) tree.pointerDown(x,y);
+     if (event.type==NSEventTypeLeftMouseUp) { tree.pointerUp(); gea::embedded::ui::StyleSheet::instance().hoverChanged(); }
+    }
+    if (!inside || event.type!=NSEventTypeLeftMouseDown) return event;
+    // Gesture recognizers can consume the up event; never leave a press latched.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,180*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
+     if (!(NSEvent.pressedMouseButtons & 1)) {
+      gea::embedded::ui::Tree::instance().pointerUp();
+      gea::embedded::ui::StyleSheet::instance().hoverChanged();
+     }
+    });
+    for (int i=0;i<16;i++) dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(i*0.008*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+     GeaContentView *current=weakView;
+     if (current.window.isKeyWindow && NSApp.isActive && NSPointInRect([current convertPoint:current.window.mouseLocationOutsideOfEventStream fromView:nil],current.bounds)) [frames[i] set];
+    });
+    return event;
+   }];
+  }
+ }
+}
+- (void)updateTrackingAreas {
+ [super updateTrackingAreas];
+ if (self.geaPointerTracking) [self removeTrackingArea:self.geaPointerTracking];
+ self.geaPointerTracking=[[NSTrackingArea alloc] initWithRect:NSZeroRect options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect) owner:self userInfo:nil];
+ [self addTrackingArea:self.geaPointerTracking];
+}
+- (void)mouseExited:(NSEvent *)event {
+ if (geaCustomInputRoot()>=0 && !std::getenv("GEA_MACOS_REPLAY_PLAN")) gea::embedded::ui::Tree::instance().pointerHover(-1,-1);
+ [super mouseExited:event];
+}
+- (void)dealloc {
+ if (self.geaCursorMonitor) [NSEvent removeMonitor:self.geaCursorMonitor];
+}
+- (void)geaPollGamepad {
+ if (!NSApp.isActive || !self.window.isKeyWindow || geaCustomInputRoot()<0) {
+  self.geaGamepadButtons=0; self.geaGamepadRepeat=0; return;
+ }
+ GCController *controller=nil;
+ for (GCController *candidate in GCController.controllers) if (candidate.extendedGamepad) { controller=candidate; break; }
+ if (controller!=self.geaActiveController) { self.geaActiveController=controller; self.geaGamepadButtons=0; self.geaGamepadRepeat=0; }
+ GCExtendedGamepad *pad=controller.extendedGamepad;
+ if (!pad) { self.geaGamepadButtons=0; return; }
+ // Axis dead zone, edge-triggered face buttons, delayed directional repeat.
+ const bool buttons[]={pad.dpad.up.isPressed || pad.leftThumbstick.yAxis.value>0.55f,
+  pad.dpad.down.isPressed || pad.leftThumbstick.yAxis.value < -0.55f,
+  pad.dpad.left.isPressed || pad.leftThumbstick.xAxis.value < -0.55f,
+  pad.dpad.right.isPressed || pad.leftThumbstick.xAxis.value>0.55f,
+  pad.buttonA.isPressed,pad.buttonB.isPressed,pad.buttonY.isPressed,pad.buttonX.isPressed,
+  pad.leftShoulder.isPressed,pad.rightShoulder.isPressed,pad.leftTrigger.isPressed,pad.rightTrigger.isPressed,
+  pad.leftThumbstickButton.isPressed,pad.rightThumbstickButton.isPressed,pad.buttonMenu.isPressed};
+ unsigned int current=0; for(int i=0;i<15;i++) if(buttons[i])current|=1u<<i;
+ unsigned int pressed=current & ~self.geaGamepadButtons;
+ const NSTimeInterval now=NSProcessInfo.processInfo.systemUptime;
+ const unsigned int directions=current & 15;
+ if(pressed & 15) self.geaGamepadRepeat=now+0.38;
+ else if(directions && now>=self.geaGamepadRepeat) { pressed|=directions; self.geaGamepadRepeat=now+0.12; }
+ self.geaGamepadButtons=current;
+ for(int i=0;i<15;i++) if(pressed & (1u<<i)) [self geaSendKey:2000+i];
+}
 - (BOOL)isFlipped { return NO; }
+- (BOOL)acceptsFirstResponder { return geaCustomInputRoot()>=0; }
+- (void)geaSendKey:(int)code {
+ const int root=geaCustomInputRoot();if(root<0)return;
+ gea::framework::events::PointerEvent event;
+ event.type=gea::framework::events::PointerEventType::KeyDown;
+ event.targetId=root;event.keyCode=code;
+ if(!gea::embedded::ui::dispatchDocumentKeyDown(event)) gea::embedded::ui::Tree::instance().dispatchEvent(event);
+}
+- (void)keyDown:(NSEvent *)event {
+ if(geaCustomInputRoot()<0){[super keyDown:event];return;}
+ if((event.modifierFlags & NSEventModifierFlagCommand) && [[event.charactersIgnoringModifiers lowercaseString] isEqualToString:@"a"]){[self geaSendKey:1001];return;}
+ if([event.charactersIgnoringModifiers isEqualToString:@" "]){[self geaSendKey:32];if(![self hasMarkedText])[self insertText:@" " replacementRange:NSMakeRange(NSNotFound,0)];return;}
+ [self interpretKeyEvents:@[event]];
+}
+- (void)insertText:(id)text replacementRange:(NSRange)range {
+ (void)range;const int root=geaCustomInputRoot();if(root<0)return;
+ NSString *value=[text isKindOfClass:[NSAttributedString class]]?[text string]:text;
+ auto &tree=gea::embedded::ui::Tree::instance();
+ tree.setAttribute(root,"value",value.UTF8String?:"");
+ gea::framework::events::PointerEvent event;event.type=gea::framework::events::PointerEventType::Input;event.targetId=root;tree.dispatchEvent(event);
+ self.geaMarkedText=nil;
+}
+- (void)doCommandBySelector:(SEL)selector {
+ int code=0;
+ if(selector==@selector(deleteBackward:))code=8;
+ else if(selector==@selector(deleteForward:))code=46;
+ else if(selector==@selector(moveLeft:))code=37;
+ else if(selector==@selector(moveRight:))code=39;
+ else if(selector==@selector(moveUp:))code=38;
+ else if(selector==@selector(moveDown:))code=40;
+ else if(selector==@selector(moveToBeginningOfLine:))code=36;
+ else if(selector==@selector(moveToEndOfLine:))code=35;
+ else if(selector==@selector(insertNewline:))code=13;
+ else if(selector==@selector(insertTab:))code=9;
+ else if(selector==@selector(cancelOperation:))code=27;
+ if(code)[self geaSendKey:code];
+}
+- (void)paste:(id)sender { (void)sender;NSString *value=[[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];if(value)[self insertText:value replacementRange:NSMakeRange(NSNotFound,0)]; }
+- (void)copy:(id)sender {
+ (void)sender;const int root=geaCustomInputRoot();if(root<0)return;
+ NSString *text=[NSString stringWithUTF8String:gea::embedded::ui::Tree::instance().getAttribute(root,"data-gea-selected-text")];
+ if(text.length){NSPasteboard *board=[NSPasteboard generalPasteboard];[board clearContents];[board setString:text forType:NSPasteboardTypeString];}
+}
+- (void)cut:(id)sender { [self copy:sender];[self geaSendKey:46]; }
+- (void)selectAll:(id)sender { (void)sender;[self geaSendKey:1001]; }
+- (BOOL)hasMarkedText { return self.geaMarkedText.length>0; }
+- (NSRange)markedRange { return [self hasMarkedText]?NSMakeRange(0,self.geaMarkedText.length):NSMakeRange(NSNotFound,0); }
+- (NSRange)selectedRange { return NSMakeRange(NSNotFound,0); }
+- (void)setMarkedText:(id)text selectedRange:(NSRange)selection replacementRange:(NSRange)replacement {
+ (void)selection;(void)replacement;self.geaMarkedText=[text isKindOfClass:[NSAttributedString class]]?text:[[NSAttributedString alloc] initWithString:text];
+}
+- (void)unmarkText { self.geaMarkedText=nil; }
+- (NSArray<NSAttributedStringKey> *)validAttributesForMarkedText { return @[]; }
+- (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actual { (void)range;if(actual)*actual=NSMakeRange(NSNotFound,0);return nil; }
+- (NSUInteger)characterIndexForPoint:(NSPoint)point { (void)point;return NSNotFound; }
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actual {
+ (void)range;if(actual)*actual=NSMakeRange(NSNotFound,0);return [self.window convertRectToScreen:[self convertRect:self.bounds toView:nil]];
+}
 @end
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -152,6 +358,10 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	// Application::init — apps gate remote fetches on wifi().connected()
 	// (e.g. maps skips tile downloads while it reads false).
 	gea::macos::installWifiDriver();
+	// macOS has an available host filesystem before app initialization.
+	// ImageService gates external reads on this provider just as device targets
+	// gate theirs on mounted storage.
+	gea::platform::storage::setMountProvider(+[]() { return true; });
 	const bool thermalrightTarget = gea::macos::thermalright::enabled();
 	if (!thermalrightTarget) [self installMainMenu];
 
@@ -269,6 +479,9 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 
 - (void)startFrameTimer
 {
+#if defined(GEA_NATIVE_DEBUGGER) && GEA_NATIVE_DEBUGGER
+	gea_macos_debugger_start();
+#endif
 	if (self.frameTimer) return;
 	const BOOL thermalrightTarget = gea::macos::thermalright::enabled();
 	if (!thermalrightTarget) {
@@ -404,6 +617,7 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	static const bool profile = std::getenv("GEA_NATIVE_FRAME_PROFILE") != nullptr;
 	using Clock = std::chrono::steady_clock;
 	const auto applicationBegin = profile ? Clock::now() : Clock::time_point{};
+	[self.rootView geaPollGamepad];
 	gea::framework::app::Application::frame(gea_embedded_now_ms());
 	if (profile) self.geaProfileApplicationMs = std::chrono::duration<double, std::milli>(Clock::now() - applicationBegin).count();
 	auto &tree = gea::embedded::ui::Tree::instance();
@@ -431,9 +645,9 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 			else
 				singleAppAnimScanned = true;
 			gea::css::DeclarativeAnimations::scanAndStart(gea_embedded_now_ms());
-			gea::embedded::ui::StyleSheet::instance().startCssAnimations(gea_embedded_now_ms());
 		}
 	}
+	gea::embedded::ui::StyleSheet::instance().startCssAnimations(gea_embedded_now_ms());
 	gea::css::AnimationEngine::instance().tick(
 	    static_cast<std::uint32_t>(gea_embedded_now_ms()));
 
@@ -473,6 +687,96 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	gea::embedded::ui::NodeHandle(root).style().height(h);
 	tree.computeLayout(root, w, h);
 	gea::macos::MacosRenderer::instance().sync(self.rootView, root);
+
+
+ // Opt-in deterministic Gea event replay for recorded demos. No OS events or
+ // application state shortcuts; the same tree handlers process every step.
+ if (const char *planPath = getenv("GEA_MACOS_REPLAY_PLAN")) {
+  static NSArray *steps = nil;
+  static NSUInteger nextStep = 0;
+  static NSDictionary *pending = nil;
+  static int settleFrames = 0;
+  static double startedAt = 0;
+  auto replayLog = [&](NSDictionary *entry) {
+   const char *logPath = getenv("GEA_MACOS_REPLAY_LOG");
+   if (!logPath) return;
+   NSData *json = [NSJSONSerialization dataWithJSONObject:entry options:0 error:nil];
+   FILE *file = std::fopen(logPath, "a");
+   if (file) { std::fwrite(json.bytes, 1, json.length, file); std::fputc('\n', file); std::fclose(file); }
+  };
+  auto replayFail = [&](NSString *reason) {
+   replayLog(@{@"error":reason}); NSLog(@"[gea-replay] %@", reason); std::exit(2);
+  };
+  if (!steps) {
+   NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:planPath]];
+   NSDictionary *plan = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+   if (![plan isKindOfClass:[NSDictionary class]] || ![plan[@"steps"] isKindOfClass:[NSArray class]]) replayFail(@"Invalid replay plan");
+   steps = plan[@"steps"];
+  }
+  if (!startedAt) {
+   const char *marker = getenv("GEA_MACOS_REPLAY_START");
+   NSString *value = marker ? [NSString stringWithContentsOfFile:[NSString stringWithUTF8String:marker] encoding:NSUTF8StringEncoding error:nil] : nil;
+   startedAt = value.doubleValue;
+  }
+  if (startedAt) {
+   const double elapsed = NSDate.date.timeIntervalSince1970 - startedAt;
+   if (pending && ++settleFrames >= 3) {
+    NSString *expected = pending[@"expect"];
+    std::string text;
+    for (int i=0;i<tree.nodeCount();++i) { text += tree.node(i).text; text += " "; }
+    if (expected.length && text.find(expected.UTF8String) == std::string::npos) replayFail([NSString stringWithFormat:@"Step %@ did not show %@", pending[@"label"], expected]);
+    if (NSDictionary *check=pending[@"expectTextIn"]) {
+     auto subtreeText = [&](auto &&visit, int node) -> std::string {
+      std::string result=tree.node(node).text; result += " ";
+      for(int child=tree.node(node).first_child;child>=0;child=tree.node(child).next_sibling) result += visit(visit,child);
+      return result;
+     };
+     bool matched=false;
+     for(int i=0;i<tree.nodeCount();++i) if(tree.className(i).find([check[@"class"] UTF8String])!=std::string::npos) {
+      std::string raw=subtreeText(subtreeText,i);
+      NSString *value=[NSString stringWithUTF8String:raw.c_str()];
+      NSMutableArray *words=[NSMutableArray array];
+      for(NSString *word in [value componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]) if(word.length) [words addObject:word];
+      if([[words componentsJoinedByString:@" "] containsString:check[@"contains"]]) matched=true;
+     }
+     if(!matched) replayFail([NSString stringWithFormat:@"Step %@ did not show %@ in %@",pending[@"label"],check[@"contains"],check[@"class"]]);
+    }
+    replayLog(@{@"verified":pending[@"label"], @"elapsed":@(elapsed)});
+    pending = nil;
+   }
+   if (!pending && nextStep < steps.count && elapsed >= [steps[nextStep][@"at"] doubleValue]) {
+    NSDictionary *step = steps[nextStep++];
+    using gea::framework::events::PointerEvent;
+    using gea::framework::events::PointerEventType;
+    if (NSString *text = step[@"text"]) {
+     const int inputRoot = geaCustomInputRoot();
+     if (inputRoot < 0) replayFail(@"No Gea input root");
+     tree.setAttribute(inputRoot,"value",text.UTF8String);
+     PointerEvent event; event.type=PointerEventType::Input; event.targetId=inputRoot; tree.dispatchEvent(event);
+    } else {
+     const int x=[step[@"x"] intValue], y=[step[@"y"] intValue];
+     NSPoint point=NSMakePoint(x,self.rootView.bounds.size.height-y);
+     NSView *hit=[self.rootView hitTest:[self.rootView convertPoint:point toView:self.rootView.superview]];
+     int target=gea::macos::nodeIdForView(hit), ancestor=target;
+     const std::string expected=[step[@"target"] UTF8String];
+     while (ancestor>=0 && tree.className(ancestor).find(expected)==std::string::npos) ancestor=tree.node(ancestor).parent;
+     if (target<0 || ancestor<0) replayFail([NSString stringWithFormat:@"Wrong hit target for %@",step[@"label"]]);
+     tree.pointerHover(x,y);
+     if (!geaOwnsContourPress(x,y)) tree.pointerDown(x,y);
+     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,80*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
+      gea::embedded::ui::Tree::instance().pointerUp();
+     });
+     for (auto phase : {PointerEventType::TouchStart,PointerEventType::TouchEnd,PointerEventType::Click}) {
+      PointerEvent event; event.type=phase; event.targetId=target; event.pointerId=1;
+      event.x=x; event.y=y; event.clientX=x; event.clientY=y; event.pageX=x; event.pageY=y;
+      tree.dispatchEvent(event);
+     }
+    }
+    replayLog(@{@"action":step[@"label"], @"elapsed":@(elapsed), @"index":@(nextStep-1)});
+    pending=step; settleFrames=0;
+   }
+  }
+ }
 
 	if (const char *clickEnv = getenv("GEA_MACOS_SYNTH_CLICK")) {
 		static int frameCount = 0;
@@ -569,6 +873,17 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 {
 	(void)notification;
 	if (gea::macos::thermalright::enabled()) return;
+	if (!self.splitShell) {
+		const NSSize size = self.rootView.bounds.size;
+		const int width = static_cast<int>(size.width), height = static_cast<int>(size.height);
+		if (width > 0 && height > 0 &&
+		    (width != gea::embedded::ui::Document::preferredMountWidth() ||
+		     height != gea::embedded::ui::Document::preferredMountHeight())) {
+			gea::embedded::ui::Document::setPreferredMountSize(width, height);
+			// AppKit layout uses points; a CSS px is one point, including on Retina.
+			gea::embedded::ui::setViewportMetrics(width, height, 1.0);
+		}
+	}
 	// Sync immediately on resize end too; the live-mode timer covers the
 	// drag, this handles the final snap.
 	[self tick];

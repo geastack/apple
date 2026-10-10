@@ -38,10 +38,33 @@
 // full bounds, with no implicit padding, so the text fits the same space
 // our host measurement reported.
 @interface GeaTextCell : NSTextFieldCell
+@property(nonatomic, assign) NSEdgeInsets contentInsets;
+@property(nonatomic, assign) BOOL verticallyCenters;
 @end
 @implementation GeaTextCell
 - (NSRect)drawingRectForBounds:(NSRect)bounds { return bounds; }
 - (NSRect)titleRectForBounds:(NSRect)bounds { return bounds; }
+- (NSRect)contentRectForBounds:(NSRect)bounds inView:(NSView *)view
+{
+	const NSEdgeInsets inset = self.contentInsets;
+	bounds.origin.x += inset.left;
+	bounds.origin.y += view.isFlipped ? inset.top : inset.bottom;
+	bounds.size.width = std::max<CGFloat>(0, bounds.size.width - inset.left - inset.right);
+	bounds.size.height = std::max<CGFloat>(0, bounds.size.height - inset.top - inset.bottom);
+	return bounds;
+}
+- (void)drawInteriorWithFrame:(NSRect)frame inView:(NSView *)view
+{
+	// NSString drawing respects paragraph alignment without NSTextFieldCell's
+	// extra centered-text margins. The engine owns the CSS border/content boxes.
+	NSRect content = [self contentRectForBounds:frame inView:view];
+ if (self.verticallyCenters) {
+   const NSRect measured = [self.attributedStringValue boundingRectWithSize:NSMakeSize(content.size.width, CGFLOAT_MAX) options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading];
+   content.origin.y += std::max<CGFloat>(0, (content.size.height - measured.size.height) / 2);
+ }
+ [self.attributedStringValue drawWithRect:content
+	                                options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading];
+}
 @end
 
 @interface GeaLabelTextField : NSTextField
@@ -51,6 +74,30 @@
 - (void)mouseDown:(NSEvent *)event { [self.nextResponder mouseDown:event]; }
 - (void)mouseDragged:(NSEvent *)event { [self.nextResponder mouseDragged:event]; }
 - (void)mouseUp:(NSEvent *)event { [self.nextResponder mouseUp:event]; }
+@end
+
+@interface GeaInputCell : NSTextFieldCell
+@property(nonatomic, assign) NSEdgeInsets contentInsets;
+@end
+@implementation GeaInputCell
+- (NSRect)drawingRectForBounds:(NSRect)bounds
+{
+	const NSEdgeInsets inset = self.contentInsets;
+	bounds.origin.x += inset.left;
+	bounds.origin.y += self.controlView.isFlipped ? inset.top : inset.bottom;
+	bounds.size.width = std::max<CGFloat>(0, bounds.size.width - inset.left - inset.right);
+	bounds.size.height = std::max<CGFloat>(0, bounds.size.height - inset.top - inset.bottom);
+	return bounds;
+}
+- (NSRect)titleRectForBounds:(NSRect)bounds { return [self drawingRectForBounds:bounds]; }
+- (void)editWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor delegate:(id)delegate event:(NSEvent *)event
+{
+	[super editWithFrame:[self drawingRectForBounds:frame] inView:view editor:editor delegate:delegate event:event];
+}
+- (void)selectWithFrame:(NSRect)frame inView:(NSView *)view editor:(NSText *)editor delegate:(id)delegate start:(NSInteger)start length:(NSInteger)length
+{
+	[super selectWithFrame:[self drawingRectForBounds:frame] inView:view editor:editor delegate:delegate start:start length:length];
+}
 @end
 
 // Editable text field used to materialize `<input>` JSX elements. Holds the
@@ -67,6 +114,7 @@
 @end
 
 @implementation GeaInputField
++ (Class)cellClass { return [GeaInputCell class]; }
 
 - (instancetype)initWithFrame:(NSRect)frameRect
 {
@@ -194,6 +242,62 @@ static int geaKeyCodeForCommand(SEL sel)
 }
 @end
 
+static bool geaBooleanAttribute(int nodeId, const char *name)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	const char *value = tree.getAttribute(nodeId, name);
+	return tree.hasAttribute(nodeId, name) && (!value || (std::strcmp(value, "false") != 0 && std::strcmp(value, "0") != 0));
+}
+
+static void geaControlInput(int nodeId, const char *value, const char *checked = nullptr)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	if (nodeId < 0 || nodeId >= tree.nodeCount()) return;
+	if (geaBooleanAttribute(nodeId, "disabled")) return;
+	if (value) tree.setAttribute(nodeId, "value", value);
+	if (checked) tree.setAttribute(nodeId, "checked", checked);
+	gea::framework::events::PointerEvent event;
+	event.type = gea::framework::events::PointerEventType::Input;
+	event.targetId = nodeId;
+	tree.dispatchEvent(event);
+}
+
+@interface GeaChoice : NSButton
+@property(nonatomic, assign) int nodeId;
+@property(nonatomic, assign) BOOL radio;
+@end
+@implementation GeaChoice
+- (void)geaChanged:(id)sender
+{
+	(void)sender;
+	if (self.radio) self.state = NSControlStateValueOn;
+	geaControlInput(self.nodeId, nullptr, self.state == NSControlStateValueOn ? "true" : "false");
+}
+@end
+
+@interface GeaPopUp : NSPopUpButton
+@property(nonatomic, assign) int nodeId;
+@end
+@implementation GeaPopUp
+- (void)geaChanged:(id)sender
+{
+	(void)sender;
+	NSString *value = self.selectedItem.representedObject ?: self.selectedItem.title;
+	geaControlInput(self.nodeId, [value UTF8String] ?: "");
+}
+@end
+
+@interface GeaStepper : NSStepper
+@property(nonatomic, assign) int nodeId;
+@end
+@implementation GeaStepper
+- (void)geaChanged:(id)sender
+{
+	(void)sender;
+	geaControlInput(self.nodeId, [[NSString stringWithFormat:@"%.15g", self.doubleValue] UTF8String]);
+}
+@end
+
 // Root-level press handler. Installed once on the contentView during
 // MacosRenderer::sync. On mouse-down, asks the recognizer for the location,
 // hit-tests against the root, then walks up via nodeIdForView to find the
@@ -224,6 +328,38 @@ static NSView *hitTestInRoot(NSView *root, NSPoint point)
 	// same root we converted from, not its superview (which expects yet another
 	// coordinate space and can select a sibling pane or the surrounding grid).
 	return [root hitTest:[root convertPoint:point toView:root.superview]];
+}
+
+void publishControlEventBounds(int nodeId)
+{
+ auto &tree=gea::embedded::ui::Tree::instance();
+        for(int control=nodeId;control>=0;control=tree.node(control).parent){
+          if(std::strcmp(tree.getAttribute(control,"data-gea-control"),"true")!=0)continue;
+          auto bounds=tree.node(control).layout;
+          // Range values follow the thumb's actual travel, excluding arrow
+          // buttons, frame padding, and the value label.
+          const int owner=tree.node(control).parent;
+          const char *ownerType=tree.getAttribute(owner,"data-xaml-type");
+          if(std::strcmp(tree.getAttribute(control,"role"),"slider")==0 || std::strcmp(ownerType,"Slider")==0 || std::strcmp(ownerType,"LSSlider")==0){
+            for(int thumb=0;thumb<tree.nodeCount();++thumb){
+              const char *type=tree.getAttribute(thumb,"data-xaml-type");
+              if(std::strcmp(type,"LSThumb")!=0&&std::strcmp(type,"Thumb")!=0)continue;
+              bool belongs=false;
+              for(int ancestor=tree.node(thumb).parent;ancestor>=0;ancestor=tree.node(ancestor).parent)if(ancestor==owner){belongs=true;break;}
+              const int track=tree.node(thumb).parent;
+              if(!belongs||track<0)continue;
+              const auto &thumbBox=tree.node(thumb).layout;
+              const auto &trackBox=tree.node(track).layout;
+              if(trackBox.width>thumbBox.width){bounds.x=trackBox.x+thumbBox.width/2;bounds.width=trackBox.width-thumbBox.width;}
+              break;
+            }
+          }
+          tree.setAttribute(control,"data-gea-x",std::to_string(bounds.x).c_str());
+          tree.setAttribute(control,"data-gea-y",std::to_string(bounds.y).c_str());
+          tree.setAttribute(control,"data-gea-width",std::to_string(bounds.width).c_str());
+          tree.setAttribute(control,"data-gea-height",std::to_string(bounds.height).c_str());
+          break;
+        }
 }
 
 int nodeIdForView(NSView *view)
@@ -268,8 +404,9 @@ int nodeIdForView(NSView *view)
 		if (nodeId < 0) return;
 		auto &tree = gea::embedded::ui::Tree::instance();
 		if (nodeId >= tree.nodeCount()) return;
-		PointerEvent ev;
-		ev.type = type;
+        gea::macos::publishControlEventBounds(nodeId);
+        PointerEvent ev;
+        ev.type = type;
 		ev.targetId = nodeId;
 		ev.pointerId = 1;
 		ev.x = px;
@@ -306,9 +443,12 @@ int nodeIdForView(NSView *view)
 		// editor's value guard no longer skips, letting the title/body refresh
 		// to the newly selected note. (Clicks on editable fields never reach
 		// this recognizer — the delegate declines them.)
-		if (root.window.firstResponder != root.window) {
-			[root.window makeFirstResponder:nil];
-		}
+		bool customInputs=false;
+        auto &inputTree=gea::embedded::ui::Tree::instance();
+        for(int i=0;i<inputTree.nodeCount();++i)if(std::strcmp(inputTree.getAttribute(i,"data-gea-inputs"),"true")==0){customInputs=true;break;}
+        if(customInputs)[root.window makeFirstResponder:root];
+        else if(root.window.firstResponder!=root.window)[root.window makeFirstResponder:nil];
+
 		// Mouse-down: hit-test now, remember the node so the move and up
 		// phases dispatch to the same target even if the cursor drifts.
 		NSView *hit = gea::macos::hitTestInRoot(root, pInRoot);
@@ -359,8 +499,12 @@ int nodeIdForView(NSView *view)
 	const NSPoint p = [root convertPoint:event.locationInWindow fromView:nil];
 	NSView *hit = gea::macos::hitTestInRoot(root, p);
 	for (NSView *v = hit; v != nil; v = v.superview) {
+		// Native controls own their tracking loops and dispatch their own actions.
+		// Recognizing a root press as well steals drags, menu tracking and repeats.
+		if ([v isKindOfClass:[NSButton class]] || [v isKindOfClass:[NSSlider class]] ||
+		    [v isKindOfClass:[NSSwitch class]] || [v isKindOfClass:[NSStepper class]]) return NO;
 		if ([v isKindOfClass:[NSTextView class]]) return NO;
-		if ([v isKindOfClass:[NSTextField class]] && ((NSTextField *)v).isEditable) return NO;
+		if ([v isKindOfClass:[NSTextField class]] && (((NSTextField *)v).isEditable || ((NSTextField *)v).isSelectable)) return NO;
 		// Canvas views dispatch their own coordinate-carrying touch events
 		// (mouseDown/Dragged/Up in GeaCanvasView) — recognizing here too would
 		// double-fire the press.
@@ -608,6 +752,41 @@ NSView *makeSwitch()
 	return sw;
 }
 
+NSView *makeChoice(bool radio)
+{
+	GeaChoice *choice = [[GeaChoice alloc] initWithFrame:NSZeroRect];
+	choice.nodeId = -1;
+	choice.radio = radio;
+	choice.buttonType = radio ? NSButtonTypeRadio : NSButtonTypeSwitch;
+	choice.title = @"";
+	choice.target = choice;
+	choice.action = @selector(geaChanged:);
+	return choice;
+}
+
+NSView *makePopUp()
+{
+	GeaPopUp *popup = [[GeaPopUp alloc] initWithFrame:NSZeroRect pullsDown:NO];
+	popup.nodeId = -1;
+	popup.menu.autoenablesItems = NO;
+	popup.target = popup;
+	popup.action = @selector(geaChanged:);
+	return popup;
+}
+
+NSView *makeStepper()
+{
+	GeaStepper *stepper = [[GeaStepper alloc] initWithFrame:NSZeroRect];
+	stepper.nodeId = -1;
+	stepper.minValue = 0;
+	stepper.maxValue = 100;
+	stepper.increment = 1;
+	stepper.valueWraps = NO;
+	stepper.target = stepper;
+	stepper.action = @selector(geaChanged:);
+	return stepper;
+}
+
 NSView *makeButton()
 {
 	NSButton *btn = [[NSButton alloc] initWithFrame:NSZeroRect];
@@ -699,6 +878,7 @@ NSView *makeSymbolView()
 NSView *makeTextArea()
 {
 	NSScrollView *sv = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+	sv.automaticallyAdjustsContentInsets = NO;
 	sv.hasVerticalScroller = YES;
 	sv.hasHorizontalScroller = NO;
 	sv.autohidesScrollers = YES;
@@ -711,6 +891,7 @@ NSView *makeTextArea()
 	const NSSize cs = sv.contentSize;
 	NSTextContainer *tc = [[NSTextContainer alloc] initWithContainerSize:NSMakeSize(cs.width, CGFLOAT_MAX)];
 	tc.widthTracksTextView = YES;
+	tc.lineFragmentPadding = 0;
 	NSLayoutManager *lm = [[NSLayoutManager alloc] init];
 	[lm addTextContainer:tc];
 	NSTextStorage *ts = [[NSTextStorage alloc] init];
@@ -738,13 +919,23 @@ NSView *makeTextArea()
 // materialized instead of an empty NSView. Calls to applyInputProps later
 // pick up placeholder / value / font / color from the node.
 NSView *makeViewForType(gea::embedded::ui::NodeType type, const char *tagName,
-                        const gea::embedded::ui::ComputedStyle &style, const char *inputType)
+                        const gea::embedded::ui::ComputedStyle &style, const char *inputType, bool checkboxButton)
 {
 	using gea::embedded::ui::NodeType;
 	if (type == NodeType::View && tagName && std::strcmp(tagName, "input") == 0) {
 		if (inputType && std::strcmp(inputType, "range") == 0) return makeSlider();
+		if (inputType && std::strcmp(inputType, "radio") == 0) return makeChoice(true);
+		if (checkboxButton) return makeChoice(false);
 		if (inputType && std::strcmp(inputType, "checkbox") == 0) return makeSwitch();
 		return makeInputField();
+	}
+	if (type == NodeType::View && tagName && std::strcmp(tagName, "select") == 0) return makePopUp();
+	if (type == NodeType::View && tagName && std::strcmp(tagName, "stepper") == 0) return makeStepper();
+	if (type == NodeType::View && tagName && std::strcmp(tagName, "progress") == 0) {
+		NSProgressIndicator *progress = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+		progress.indeterminate = NO;
+		progress.maxValue = 100;
+		return progress;
 	}
 	if (type == NodeType::View && tagName && std::strcmp(tagName, "textarea") == 0) {
 		return makeTextArea();
@@ -940,7 +1131,7 @@ char kInsetShadowKey;  // CAShapeLayer casting the inset box-shadow
 
 CGColorRef createStyleCGColor(gea::embedded::ui::style_color_t color, uint8_t alpha)
 {
-	CGColor *base = gea::macos::rgb565ToCGColor(color);
+	CGColor *base = gea::macos::nativeToCGColor(color);
 	if (alpha == 255) return base;
 	CGColor *faded = CGColorCreateCopyWithAlpha(base, alpha / 255.0);
 	CGColorRelease(base);
@@ -1201,7 +1392,7 @@ void applyViewStyle(NSView *view, const gea::embedded::ui::Node &node,
 			// alpha in bg_alpha (255 = opaque). Without honoring it, translucent
 			// backgrounds (weather's rgba(255,255,255,0.12) city chips) painted
 			// fully opaque.
-			CGColor *bg = gea::macos::rgb565ToCGColor(node.style.bg_color);
+			CGColor *bg = gea::macos::nativeToCGColor(node.style.bg_color);
 			if (node.style.bg_alpha != 255) {
 				CGColor *faded = CGColorCreateCopyWithAlpha(bg, node.style.bg_alpha / 255.0);
 				CGColorRelease(bg);
@@ -1215,12 +1406,14 @@ void applyViewStyle(NSView *view, const gea::embedded::ui::Node &node,
 	}
 
 	view.alphaValue = static_cast<CGFloat>(node.style.opacity) / 255.0;
-	view.hidden = (node.style.display == 1);
+	// Visibility preserves the arranged box, but suppresses its native artwork
+	// and hit testing. Gea checkmarks toggle this independently of display.
+	view.hidden = (node.style.display == 1 || node.style.visibility != 0);
 
 	// Border (border_alpha carries the CSS alpha, same as bg_alpha above).
 	if (node.style.border_width > 0) {
 		view.layer.borderWidth = node.style.border_width;
-		CGColor *bc = gea::macos::rgb565ToCGColor(node.style.border_color);
+		CGColor *bc = gea::macos::nativeToCGColor(node.style.border_color);
 		if (node.style.border_alpha != 255) {
 			CGColor *faded = CGColorCreateCopyWithAlpha(bc, node.style.border_alpha / 255.0);
 			CGColorRelease(bc);
@@ -1306,11 +1499,19 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	       [value attribute:NSStrikethroughStyleAttributeName atIndex:0 effectiveRange:nil] != nil;
 }
 
-void applyTextProps(NSTextField *tf, const gea::embedded::ui::Node &node)
+void applyTextProps(NSTextField *tf, const gea::embedded::ui::Node &node, int nodeId)
 {
 	NSString *raw = [NSString stringWithUTF8String:(node.text.empty() ? "" : node.text.c_str())];
 	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
-	NSColor *color = gea::macos::rgb565ToNSColor(node.style.text_color);
+	NSColor *color = gea::macos::nativeToNSColor(node.style.text_color);
+	GeaTextCell *cell = (GeaTextCell *)tf.cell;
+ const char *vertical = gea::embedded::ui::Tree::instance().getAttribute(nodeId, "data-text-valign");
+ cell.verticallyCenters = vertical && std::strcmp(vertical, "center") == 0;
+	cell.contentInsets = NSEdgeInsetsMake(
+	    node.style.padding[0] + gea::embedded::ui::computedBorderWidth(node.style, 0),
+	    node.style.padding[3] + gea::embedded::ui::computedBorderWidth(node.style, 3),
+	    node.style.padding[2] + gea::embedded::ui::computedBorderWidth(node.style, 2),
+	    node.style.padding[1] + gea::embedded::ui::computedBorderWidth(node.style, 1));
 
 	NSTextAlignment alignment;
 	switch (node.style.text_align) {
@@ -1319,30 +1520,15 @@ void applyTextProps(NSTextField *tf, const gea::embedded::ui::Node &node)
 	default: alignment = NSTextAlignmentLeft;
 	}
 
-	// Use the same attributes the host measurement hook (font_registry.mm's
-	// gea_host_measure_text) uses — same font, same break mode, default
-	// kerning. Identical attributes guarantee the rendered NSTextField has
-	// exactly the width/height the framework's layout engine allocated for
-	// the text node, so titles never end up with a gap below them from
-	// over-allocation and long labels never overflow into clipped territory
-	// from under-allocation.
-	//
-	// Alignment is deliberately NOT one of those attributes. An
-	// NSParagraphStyle whose `alignment` is NSTextAlignmentCenter makes
-	// NSTextFieldCell demand FOUR MORE POINTS of width for the same string
-	// (measured: "Reset"/Inter 15 needs 44pt with a natural or left/right
-	// paragraph and 48pt with a centred one). The measurement hook sets only
-	// `lineBreakMode`, so every centre-aligned label was laid out 4pt narrower
-	// than AppKit would draw it, `wraps = YES` broke the word onto a second
-	// line, and the field's one-line height hid it: "COUNTER" rendered as
-	// "COUNTE", "Reset" as "Rese", "Ready" as "Read". Single-glyph labels
-	// survived only because their boxes had more than 4pt of slack.
-	//
-	// `tf.alignment` below still centres the text and costs nothing, because
-	// the cell -- not the paragraph style -- applies it. Keep alignment there.
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
-	const CGFloat availableWidth = node.layout.width > 0 ? node.layout.width : CGFLOAT_MAX;
+	const CGFloat contentWidth = node.layout.width - cell.contentInsets.left - cell.contentInsets.right;
+	const CGFloat availableWidth = node.layout.width > 0 ? std::max<CGFloat>(0, contentWidth) : CGFLOAT_MAX;
 	paragraph.lineBreakMode = gea::macos::lineBreakModeForText(raw, font, availableWidth);
+	paragraph.alignment = alignment;
+	if (node.style.line_height > 0) {
+		paragraph.minimumLineHeight = node.style.line_height;
+		paragraph.maximumLineHeight = node.style.line_height;
+	}
 	NSMutableDictionary *attrs = textAttributes(font ?: [NSFont systemFontOfSize:node.style.font_size > 0 ? node.style.font_size : 12],
 	                                            color,
 	                                            node.style.text_decoration);
@@ -1360,6 +1546,13 @@ void applyInputProps(GeaInputField *tf, const gea::embedded::ui::Node &node, int
 {
 	using gea::embedded::ui::Tree;
 	tf.nodeId = nodeId;
+	tf.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	tf.editable = tf.enabled && !geaBooleanAttribute(nodeId, "readOnly") && !geaBooleanAttribute(nodeId, "readonly");
+	((GeaInputCell *)tf.cell).contentInsets = NSEdgeInsetsMake(
+	    node.style.padding[0] + gea::embedded::ui::computedBorderWidth(node.style, 0),
+	    node.style.padding[3] + gea::embedded::ui::computedBorderWidth(node.style, 3),
+	    node.style.padding[2] + gea::embedded::ui::computedBorderWidth(node.style, 2),
+	    node.style.padding[1] + gea::embedded::ui::computedBorderWidth(node.style, 1));
 
 	// The store drives `value` via the framework's reactive-attribute machinery,
 	// which writes to `node.setAttribute("value", ...)`. Mirror that to the
@@ -1372,7 +1565,7 @@ void applyInputProps(GeaInputField *tf, const gea::embedded::ui::Node &node, int
 	// whether the field is currently focused — so the editor clears correctly.
 	auto &tree = Tree::instance();
 	const char *value = tree.getAttribute(nodeId, "value");
-	tf.textColor = gea::macos::rgb565ToNSColor(node.style.text_color);
+	tf.textColor = gea::macos::nativeToNSColor(node.style.text_color);
 	tf.font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
 	switch (node.style.text_align) {
 	case 1: tf.alignment = NSTextAlignmentCenter; break;
@@ -1405,6 +1598,7 @@ void applySliderProps(GeaSlider *sl, const gea::embedded::ui::Node &node, int no
 	using gea::embedded::ui::Tree;
 	auto &tree = Tree::instance();
 	sl.nodeId = nodeId;
+	sl.enabled = !geaBooleanAttribute(nodeId, "disabled");
 	const char *minA = tree.getAttribute(nodeId, "min");
 	const char *maxA = tree.getAttribute(nodeId, "max");
 	if (minA && minA[0]) sl.minValue = atof(minA);
@@ -1424,12 +1618,112 @@ void applySwitchProps(GeaSwitch *sw, const gea::embedded::ui::Node &node, int no
 	using gea::embedded::ui::Tree;
 	auto &tree = Tree::instance();
 	sw.nodeId = nodeId;
+	sw.enabled = !geaBooleanAttribute(nodeId, "disabled");
 	const char *checked = tree.getAttribute(nodeId, "checked");
 	const bool hasChecked = tree.hasAttribute(nodeId, "checked");
 	const bool explicitlyOff = checked && (std::strcmp(checked, "false") == 0 || std::strcmp(checked, "0") == 0);
 	const bool on = hasChecked && !explicitlyOff;
 	const NSControlStateValue want = on ? NSControlStateValueOn : NSControlStateValueOff;
 	if (sw.state != want) sw.state = want;
+}
+
+void applyChoiceProps(GeaChoice *choice, int nodeId)
+{
+	choice.nodeId = nodeId;
+	choice.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	const NSControlStateValue state = geaBooleanAttribute(nodeId, "checked") ? NSControlStateValueOn : NSControlStateValueOff;
+	if (choice.state != state) choice.state = state;
+}
+
+NSString *controlText(int nodeId)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	std::string result;
+	std::vector<int> stack{nodeId};
+	while (!stack.empty()) {
+		const int id = stack.back();
+		stack.pop_back();
+		const auto &node = tree.node(id);
+		if (!node.text.empty()) result += node.text.c_str();
+		std::vector<int> children;
+		for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) children.push_back(child);
+		for (auto it = children.rbegin(); it != children.rend(); ++it) stack.push_back(*it);
+	}
+	return [NSString stringWithUTF8String:result.c_str()] ?: @"";
+}
+
+void applyPopUpProps(GeaPopUp *popup, const gea::embedded::ui::Node &node, int nodeId)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	popup.nodeId = nodeId;
+	popup.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	popup.font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	NSMutableArray<NSString *> *titles = [NSMutableArray array], *values = [NSMutableArray array];
+	std::vector<bool> disabled;
+	NSInteger selected = -1;
+	const char *value = tree.getAttribute(nodeId, "value");
+	NSString *desired = tree.hasAttribute(nodeId, "value") ? [NSString stringWithUTF8String:value] : nil;
+	for (int child = node.first_child; child >= 0; child = tree.node(child).next_sibling) {
+		const char *tag = tree.tagName(child);
+		if (!tag || std::strcmp(tag, "option") != 0) continue;
+		NSString *title = controlText(child);
+		const char *optionValue = tree.getAttribute(child, "value");
+		NSString *itemValue = tree.hasAttribute(child, "value") ? [NSString stringWithUTF8String:optionValue] : title;
+		if ((desired && [desired isEqualToString:itemValue]) || (!desired && geaBooleanAttribute(child, "selected"))) selected = titles.count;
+		[titles addObject:title];
+		[values addObject:itemValue ?: @""];
+		disabled.push_back(geaBooleanAttribute(child, "disabled"));
+	}
+	BOOL changed = popup.numberOfItems != (NSInteger)titles.count;
+	for (NSUInteger i = 0; !changed && i < titles.count; ++i) {
+		NSMenuItem *item = [popup itemAtIndex:i];
+		changed = ![item.title isEqualToString:titles[i]] || ![item.representedObject isEqual:values[i]];
+	}
+	if (changed) {
+		[popup removeAllItems];
+		for (NSUInteger i = 0; i < titles.count; ++i) {
+			NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:titles[i] action:nil keyEquivalent:@""];
+			item.representedObject = values[i];
+			[popup.menu addItem:item];
+		}
+	}
+	for (NSUInteger i = 0; i < titles.count; ++i) [popup itemAtIndex:i].enabled = !disabled[i];
+	if (selected >= 0 && popup.indexOfSelectedItem != selected) [popup selectItemAtIndex:selected];
+}
+
+void applyStepperProps(GeaStepper *stepper, int nodeId)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	stepper.nodeId = nodeId;
+	stepper.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	const char *min = tree.getAttribute(nodeId, "min"), *max = tree.getAttribute(nodeId, "max");
+	const char *step = tree.getAttribute(nodeId, "step"), *value = tree.getAttribute(nodeId, "value");
+	stepper.minValue = min && min[0] ? atof(min) : 0;
+	stepper.maxValue = max && max[0] ? atof(max) : 100;
+	stepper.increment = step && atof(step) > 0 ? atof(step) : 1;
+	if (value && value[0]) stepper.doubleValue = atof(value);
+}
+
+void applyProgressProps(NSProgressIndicator *progress, int nodeId)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	const char *style = tree.getAttribute(nodeId, "data-style");
+	const NSProgressIndicatorStyle desiredStyle = style && std::strcmp(style, "spinner") == 0 ? NSProgressIndicatorStyleSpinning : NSProgressIndicatorStyleBar;
+	const bool styleChanged = progress.style != desiredStyle;
+	if (styleChanged) progress.style = desiredStyle;
+	const bool indeterminate = geaBooleanAttribute(nodeId, "indeterminate");
+	const bool modeChanged = progress.indeterminate != indeterminate;
+	if (modeChanged) progress.indeterminate = indeterminate;
+	const char *max = tree.getAttribute(nodeId, "max"), *value = tree.getAttribute(nodeId, "value");
+	progress.maxValue = max && atof(max) > 0 ? atof(max) : 100;
+	if (value && value[0]) progress.doubleValue = atof(value);
+	const bool running = indeterminate && (!tree.hasAttribute(nodeId, "data-running") || geaBooleanAttribute(nodeId, "data-running"));
+	NSNumber *previous = objc_getAssociatedObject(progress, "gea.progress_running");
+	if (!previous || previous.boolValue != running || styleChanged || modeChanged) {
+		if (running) [progress startAnimation:nil];
+		else [progress stopAnimation:nil];
+		objc_setAssociatedObject(progress, "gea.progress_running", @(running), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
 }
 
 void applySymbolProps(NSImageView *iv, const gea::embedded::ui::Node &node, int nodeId)
@@ -1455,7 +1749,7 @@ void applySymbolProps(NSImageView *iv, const gea::embedded::ui::Node &node, int 
 	// SF Symbols render as template images; tint with the node's CSS color
 	// (falls back to the system label color so they adapt to dark mode).
 	if (node.style.text_color != 0) {
-		iv.contentTintColor = gea::macos::rgb565ToNSColor(node.style.text_color);
+		iv.contentTintColor = gea::macos::nativeToNSColor(node.style.text_color);
 	} else {
 		iv.contentTintColor = [NSColor labelColor];
 	}
@@ -1490,10 +1784,16 @@ void applyTextAreaProps(NSScrollView *sv, const gea::embedded::ui::Node &node, i
 	Tree &tree = Tree::instance();
 	GeaTextAreaView *tv = objc_getAssociatedObject(sv, "gea.text_view");
 	if (!tv) return;
+	sv.contentInsets = NSEdgeInsetsMake(
+	    node.style.padding[0] + gea::embedded::ui::computedBorderWidth(node.style, 0),
+	    node.style.padding[3] + gea::embedded::ui::computedBorderWidth(node.style, 3),
+	    node.style.padding[2] + gea::embedded::ui::computedBorderWidth(node.style, 2),
+	    node.style.padding[1] + gea::embedded::ui::computedBorderWidth(node.style, 1));
 	tv.nodeId = nodeId;
+	tv.editable = !geaBooleanAttribute(nodeId, "disabled") && !geaBooleanAttribute(nodeId, "readOnly") && !geaBooleanAttribute(nodeId, "readonly");
 
 	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size > 0 ? node.style.font_size : 14);
-	NSColor *color = gea::macos::rgb565ToNSColor(node.style.text_color);
+	NSColor *color = gea::macos::nativeToNSColor(node.style.text_color);
 	tv.font = font ?: [NSFont systemFontOfSize:14];
 	tv.textColor = color ?: [NSColor labelColor];
 	tv.insertionPointColor = tv.textColor;
@@ -1527,6 +1827,7 @@ void applyButtonProps(NSButton *btn, const gea::embedded::ui::Node &node, int no
 {
 	using namespace gea::embedded::ui;
 	Tree &tree = Tree::instance();
+	btn.enabled = !geaBooleanAttribute(nodeId, "disabled");
 
 	// Title from the first Text child, if any. JSX <Button>label</Button>
 	// produces a Button with a text child.
@@ -1572,7 +1873,7 @@ void applyButtonProps(NSButton *btn, const gea::embedded::ui::Node &node, int no
 	if (btn.bordered != static_cast<BOOL>(!cssStyled)) btn.bordered = !cssStyled;
 	if (cssStyled) {
 		NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
-		NSColor *color = node.style.text_color != 0 ? gea::macos::rgb565ToNSColor(node.style.text_color)
+		NSColor *color = node.style.text_color != 0 ? gea::macos::nativeToNSColor(node.style.text_color)
 		                                            : [NSColor labelColor];
 		NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 		paragraph.alignment = NSTextAlignmentCenter;
@@ -1615,21 +1916,30 @@ void ensureViewClickRecognizer(NSView *view, int nodeId, bool wantsClick)
 	// pressId at runtime.
 }
 
-void applyImageProps(NSImageView *iv, const gea::embedded::ui::Node &node)
+void applyImageProps(NSImageView *iv, const gea::embedded::ui::Node &node, int nodeId)
 {
 	// Re-decode when image_id changes; otherwise leave the current NSImage in
 	// place to avoid rebuilding the bitmap every frame. We stash the last
 	// imageId on the view via associated object.
 	NSNumber *currentId = objc_getAssociatedObject(iv, "gea.image_id");
-	if (!currentId || currentId.intValue != node.image_id) {
-		iv.image = gea::macos::imageForId(node.image_id);
+	NSValue *previousBox = objc_getAssociatedObject(iv, "gea.image_box");
+ NSNumber *previousFit = objc_getAssociatedObject(iv, "gea.image_fit");
+ const NSSize box = NSMakeSize(node.layout.width, node.layout.height);
+ auto &imageTree = gea::embedded::ui::Tree::instance();
+ NSString *cropKey = [NSString stringWithFormat:@"%s/%s/%s/%s", imageTree.getAttribute(nodeId, "data-source-x"), imageTree.getAttribute(nodeId, "data-source-y"), imageTree.getAttribute(nodeId, "data-source-width"), imageTree.getAttribute(nodeId, "data-source-height")];
+ NSString *previousCrop = objc_getAssociatedObject(iv, "gea.image_crop");
+ if (!iv.image || ![previousCrop isEqualToString:cropKey] || !currentId || currentId.intValue != node.image_id || !previousFit || previousFit.intValue != node.style.image_fit || (node.style.image_fit == 2 && (!previousBox || !NSEqualSizes(previousBox.sizeValue, box)))) {
+		iv.image = gea::macos::imageForNode(nodeId);
+ objc_setAssociatedObject(iv, "gea.image_crop", cropKey, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+ objc_setAssociatedObject(iv, "gea.image_box", [NSValue valueWithSize:box], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+ objc_setAssociatedObject(iv, "gea.image_fit", @(node.style.image_fit), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		objc_setAssociatedObject(iv, "gea.image_id", @(node.image_id),
 		                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
 	switch (node.style.image_fit) {
 	case 0: iv.imageScaling = NSImageScaleAxesIndependently; break;
 	case 1: iv.imageScaling = NSImageScaleProportionallyUpOrDown; break;
-	case 2: iv.imageScaling = NSImageScaleProportionallyUpOrDown; break;  // "cover" ~ fit
+	case 2: iv.imageScaling = NSImageScaleAxesIndependently; break;  // cropped to the destination aspect above
 	case 3: iv.imageScaling = NSImageScaleNone; break;
 	case 4: iv.imageScaling = NSImageScaleProportionallyDown; break;
 	default: iv.imageScaling = NSImageScaleAxesIndependently;
@@ -1674,17 +1984,25 @@ void applyTypeSpecificProps(NSView *view, const gea::embedded::ui::Node &node, i
 {
 	using gea::embedded::ui::NodeType;
 	if (node.type == NodeType::Text) {
-		applyTextProps((NSTextField *)view, node);
+		applyTextProps((NSTextField *)view, node, nodeId);
 	} else if (node.type == NodeType::Button) {
 		applyButtonProps((NSButton *)view, node, nodeId);
 	} else if (node.type == NodeType::Image) {
-		applyImageProps((NSImageView *)view, node);
+		applyImageProps((NSImageView *)view, node, nodeId);
 	} else if (node.type == NodeType::Canvas) {
 		applyCanvasProps((GeaCanvasView *)view, node, nodeId);
 	} else if ([view isKindOfClass:[GeaSlider class]]) {
 		applySliderProps((GeaSlider *)view, node, nodeId);
 	} else if ([view isKindOfClass:[GeaSwitch class]]) {
 		applySwitchProps((GeaSwitch *)view, node, nodeId);
+	} else if ([view isKindOfClass:[GeaChoice class]]) {
+		applyChoiceProps((GeaChoice *)view, nodeId);
+	} else if ([view isKindOfClass:[GeaPopUp class]]) {
+		applyPopUpProps((GeaPopUp *)view, node, nodeId);
+	} else if ([view isKindOfClass:[GeaStepper class]]) {
+		applyStepperProps((GeaStepper *)view, nodeId);
+	} else if ([view isKindOfClass:[NSProgressIndicator class]]) {
+		applyProgressProps((NSProgressIndicator *)view, nodeId);
 	} else if ([view isKindOfClass:[GeaInputField class]]) {
 		applyInputProps((GeaInputField *)view, node, nodeId);
 	} else if (objc_getAssociatedObject(view, "gea.is_symbol")) {
@@ -1715,7 +2033,7 @@ void applyTypeSpecificProps(NSView *view, const gea::embedded::ui::Node &node, i
 }
 
 bool viewMatchesNode(NSView *view, const gea::embedded::ui::Node &node,
-                     const char *tagName, const char *inputType)
+                     const char *tagName, const char *inputType, bool checkboxButton)
 {
 	using gea::embedded::ui::NodeType;
 	if (!view) return false;
@@ -1725,9 +2043,14 @@ bool viewMatchesNode(NSView *view, const gea::embedded::ui::Node &node,
 
 	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "input") == 0) {
 		if (inputType && std::strcmp(inputType, "range") == 0) return [view isKindOfClass:[GeaSlider class]];
+		const bool radio = inputType && std::strcmp(inputType, "radio") == 0;
+		if (radio || checkboxButton) return [view isKindOfClass:[GeaChoice class]] && ((GeaChoice *)view).radio == radio;
 		if (inputType && std::strcmp(inputType, "checkbox") == 0) return [view isKindOfClass:[GeaSwitch class]];
 		return [view isKindOfClass:[GeaInputField class]];
 	}
+	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "select") == 0) return [view isKindOfClass:[GeaPopUp class]];
+	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "stepper") == 0) return [view isKindOfClass:[GeaStepper class]];
+	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "progress") == 0) return [view isKindOfClass:[NSProgressIndicator class]];
 	if (node.type == NodeType::View && tagName && std::strcmp(tagName, "textarea") == 0) {
 		return isTextAreaView;
 	}
@@ -1758,6 +2081,8 @@ bool viewMatchesNode(NSView *view, const gea::embedded::ui::Node &node,
 		       ![view isKindOfClass:[GeaCanvasView class]] &&
 		       ![view isKindOfClass:[GeaSlider class]] &&
 		       ![view isKindOfClass:[GeaSwitch class]] &&
+		       ![view isKindOfClass:[GeaStepper class]] &&
+		       ![view isKindOfClass:[NSProgressIndicator class]] &&
 		       ![view isKindOfClass:[GeaInputField class]];
 	}
 }
@@ -1768,13 +2093,15 @@ NSView *ensureViewForNode(int nodeId, const gea::embedded::ui::Node &node)
 	NSView *view = nodeIdToView()[key];
 	const char *tagName = gea::embedded::ui::Tree::instance().tagName(nodeId);
 	const char *inputType = gea::embedded::ui::Tree::instance().getAttribute(nodeId, "type");
-	if (view && !viewMatchesNode(view, node, tagName, inputType)) {
+	const char *control = gea::embedded::ui::Tree::instance().getAttribute(nodeId, "data-control");
+	const bool checkboxButton = inputType && std::strcmp(inputType, "checkbox") == 0 && control && std::strcmp(control, "checkbox") == 0;
+	if (view && !viewMatchesNode(view, node, tagName, inputType, checkboxButton)) {
 		[view removeFromSuperview];
 		[nodeIdToView() removeObjectForKey:key];
 		view = nil;
 	}
 	if (view) return view;
-	view = makeViewForType(node.type, tagName, node.style, inputType);
+	view = makeViewForType(node.type, tagName, node.style, inputType, checkboxButton);
 	// Stamp the nodeId on the view so the root-level click handler can map
 	// hit-tested NSViews back to tree nodes. Used by GeaRootClickBridge to
 	// dispatch with the deepest matching node's id (event delegation —
@@ -1851,7 +2178,7 @@ void appendInlineRuns(NSMutableAttributedString *out, int nodeId,
 		// ancestor's class). When the framework has filled them in we use
 		// them; otherwise we keep the parent's value as the inherited default.
 		if (node.style.text_color != 0) {
-			col = gea::macos::rgb565ToNSColor(node.style.text_color);
+			col = gea::macos::nativeToNSColor(node.style.text_color);
 		}
 		NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size);
 		if (resolved) font = resolved;
@@ -1864,7 +2191,7 @@ void appendInlineRuns(NSMutableAttributedString *out, int nodeId,
 	NSColor *col = parentColor;
 	NSFont *font = parentFont;
 	if (node.style.text_color != 0) {
-		col = gea::macos::rgb565ToNSColor(node.style.text_color);
+		col = gea::macos::nativeToNSColor(node.style.text_color);
 	}
 	NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size);
 	if (resolved) font = resolved;
@@ -1905,7 +2232,7 @@ NSTextField *renderInlineComposition(int nodeId, NSView *parentNSView,
 	}
 
 	NSFont *parentFont = gea::macos::fontForId(node.style.font_id, node.style.font_size);
-	NSColor *parentColor = gea::macos::rgb565ToNSColor(node.style.text_color);
+	NSColor *parentColor = gea::macos::nativeToNSColor(node.style.text_color);
 	NSMutableAttributedString *composite = [[NSMutableAttributedString alloc] init];
 	for (int c = node.first_child; c >= 0; c = tree.node(c).next_sibling) {
 		appendInlineRuns(composite, c, parentFont, parentColor);
@@ -1914,7 +2241,13 @@ NSTextField *renderInlineComposition(int nodeId, NSView *parentNSView,
 	// uses, so the visual style stays consistent.
 	NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
 	ps.lineBreakMode = NSLineBreakByWordWrapping;
+	ps.alignment = node.style.text_align == 1 ? NSTextAlignmentCenter : node.style.text_align == 2 ? NSTextAlignmentRight : NSTextAlignmentLeft;
 	[composite addAttribute:NSParagraphStyleAttributeName value:ps range:NSMakeRange(0, composite.length)];
+	((GeaTextCell *)field.cell).contentInsets = NSEdgeInsetsMake(
+	    node.style.padding[0] + computedBorderWidth(node.style, 0),
+	    node.style.padding[3] + computedBorderWidth(node.style, 3),
+	    node.style.padding[2] + computedBorderWidth(node.style, 2),
+	    node.style.padding[1] + computedBorderWidth(node.style, 1));
 
 	field.attributedStringValue = composite;
 	// Fill the parent's content box. The framework already laid the parent
@@ -1955,6 +2288,7 @@ void syncRecursive(int nodeId, NSView *parent, int parentAbsX, int parentAbsY, i
 	// applyButtonProps; materializing the child as an NSTextField on top
 	// would just be a redundant overlay. Skip descending into Buttons.
 	if (node.type == NodeType::Button) return;
+	if ([view isKindOfClass:[GeaPopUp class]]) return;
 
 	// `<textarea>` owns its NSTextView as its only descendant — JSX children
 	// (if any were authored) would otherwise be pushed inside NSTextView and

@@ -10,6 +10,9 @@ struct NSArray;
 
 namespace gea::macos {
 
+// Publish arranged geometry for app-owned Gea controls before dispatch.
+void publishControlEventBounds(int nodeId);
+
 class MacosRenderer {
 public:
 	static MacosRenderer &instance();

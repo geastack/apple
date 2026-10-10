@@ -1,15 +1,12 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
-import { resolve } from 'node:path'
+import { runNativeTest } from './native-harness.mjs'
 
 if (process.platform !== 'darwin') {
   console.log('SKIP: pointer routing requires AppKit')
   process.exit(0)
 }
 
-const root = resolve(fileURLToPath(new URL('../../../../../', import.meta.url)))
 const renderer = readFileSync(new URL('../main/macos_renderer.mm', import.meta.url), 'utf8')
 // Compile the production label and press bridge unchanged, alongside the real
 // engine event dispatcher. Drawing and application startup are outside this test.
@@ -38,16 +35,4 @@ ${section('@interface GeaTextCell', '// Editable text field')}
 ${section('@interface GeaRootClickBridge', '// Flipped clip view')}
 ${readFileSync(new URL('./pointer-routing.mm', import.meta.url), 'utf8')}
 `
-const pkg = `${root}/node_modules/@geastack`
-const executable = `${root}/packages/geastack-apple/dist/pointer-routing-test`
-execFileSync('clang++', [
-  '-std=c++20', '-fobjc-arc', '-ffunction-sections', '-fdata-sections', '-Wl,-dead_strip',
-  `-I${pkg}/core/include`, `-I${pkg}/host/include`, `-I${pkg}/engine`,
-  `-I${pkg}/engine/ui`, `-I${pkg}/elements`, `-I${pkg}/elements/ui`,
-  ...['core', 'tree_state', 'tree_events'].map(name => `${pkg}/engine/ui/${name}.cpp`),
-  `${pkg}/core/events.cpp`,
-  '-x', 'objective-c++', '-', '-framework', 'AppKit', '-o', executable,
-], { input: source, stdio: ['pipe', 'inherit', 'inherit'] })
-for (const test of ['label', 'offset', 'controls', 'mouse']) {
-  execFileSync(executable, [test], { stdio: 'inherit' })
-}
+await runNativeTest('pointer-routing-test', { sources: ['macos_memory.cpp'], source, args: ['label', 'offset', 'controls', 'mouse'].map((test) => [test]) })

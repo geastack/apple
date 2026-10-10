@@ -54,10 +54,15 @@ export declare const NSLayoutPriorityDefaultLow: number
 export declare const NSBoxCustom: number
 export declare const ObjCTargetAction: Selector
 
+/** @gea-host-no-property-writes */
 export declare function installRootView(view: NSView): void
+/** @gea-host-no-property-writes */
 export declare function installRootViewController(viewController: NSViewController): void
+/** @gea-host-no-property-writes */
 export declare function installToolbar(spec: string, newNoteTarget: NSObject | null): void
+/** @gea-host-no-property-writes */
 export declare function runDeviceCommand(command: string): string
+/** @gea-host-no-property-writes */
 export declare function setScrollDocumentTopAligned(scrollView: NSScrollView, content: NSView): void
 
 export declare class NSColor extends NSObject {

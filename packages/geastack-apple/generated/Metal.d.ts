@@ -5,7 +5,9 @@ export declare const MTLPrimitiveTypeTriangle: number
 export declare const MTLResourceStorageModeShared: number
 export declare const MTLCompareFunctionLess: number
 
+/** @gea-host-no-property-writes */
 export declare function MTLCreateSystemDefaultDevice(): MTLDevice | null
+/** @gea-host-no-property-writes */
 export declare function MTLClearColorMake(red: number, green: number, blue: number, alpha: number): MTLClearColor
 
 export interface MTLClearColor {

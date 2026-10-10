@@ -150,11 +150,12 @@ int main(int argc, char **argv)
             outer.frame = NSMakeRect(80, 60, 550, 550);
             require([bridge gestureRecognizer:recognizer shouldAttemptToRecognizeWithEvent:mouseEvent(label)],
                 "non-editable labels must allow the root recognizer");
-            for (NSView *control in @[[NSTextField new], [NSTextView new], [GeaCanvasView new], [NSScroller new]]) {
+            for (NSView *control in @[[NSTextField new], [NSTextView new], [GeaCanvasView new], [NSScroller new],
+                [NSButton new], [NSSlider new], [NSSwitch new], [NSStepper new], [NSPopUpButton new]]) {
                 control.frame = NSMakeRect(320, 200, 120, 60);
                 [root addSubview:control];
                 require(![bridge gestureRecognizer:recognizer shouldAttemptToRecognizeWithEvent:mouseEvent(control)],
-                    "editable text, canvases and scrollers must retain native mouse handling");
+                    "native controls, canvases and scrollers must retain their own mouse handling");
                 [control removeFromSuperview];
             }
             NSEvent *event = mouseEvent(label);

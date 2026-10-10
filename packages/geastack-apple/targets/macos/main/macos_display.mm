@@ -20,7 +20,7 @@
 namespace {
 
 gea::framework::graphics::Canvas g_canvas;
-std::uint16_t *g_framebuffer = nullptr;
+gea::framework::graphics::pixel::native_t *g_framebuffer = nullptr;
 // Logical canvas size. Starts at the compile-time panel dims and follows the
 // app's orientation: applyOrientation() below reallocates the surface (and
 // resizes the window) to the rotated logical size, so window.innerWidth, the
@@ -37,7 +37,7 @@ int g_flush_pixels = 0;
 void ensure_canvas()
 {
 	if (g_framebuffer) return;
-	g_framebuffer = static_cast<std::uint16_t *>(std::calloc((size_t)g_canvas_w * (size_t)g_canvas_h, sizeof(std::uint16_t)));
+	g_framebuffer = static_cast<gea::framework::graphics::pixel::native_t *>(std::calloc((size_t)g_canvas_w * (size_t)g_canvas_h, sizeof(gea::framework::graphics::pixel::native_t)));
 	g_canvas.bindPixels(g_framebuffer, g_canvas_w, g_canvas_h);
 }
 
@@ -62,9 +62,11 @@ void submit_full_frame()
 {
 	if (!framebuffer_target()) return;
 	ensure_canvas();
+	#if GEA_MACOS_THERMALRIGHT_DISPLAY_TARGET
 	gea::macos::thermalright::submitRgb565(g_framebuffer,
 	                                       gea::platform::display::kWidth,
 	                                       gea::platform::display::kHeight);
+#endif
 }
 
 }  // namespace
@@ -132,12 +134,11 @@ void Display::flushRectsRasterized(const DisplayFlushRect *rects, int count, Dis
 		if (x0 > x1 || y0 > y1) continue;
 		const int w = x1 - x0 + 1;
 		const int h = y1 - y0 + 1;
-		std::vector<std::uint16_t> pixels(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+		std::vector<gea::framework::graphics::pixel::native_t> pixels(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
 		raster(pixels.data(), w, h, x0, y0, user);
 		for (int row = 0; row < h; row++) {
-			std::memcpy(g_framebuffer + static_cast<std::size_t>(y0 + row) * kWidth + x0,
-			            pixels.data() + static_cast<std::size_t>(row) * w,
-			            static_cast<std::size_t>(w) * sizeof(std::uint16_t));
+			for (int col = 0; col < w; ++col)
+			g_framebuffer[static_cast<std::size_t>(y0 + row) * kWidth + x0 + col] = pixels[static_cast<std::size_t>(row) * w + col];
 		}
 		g_canvas.markDirty(x0, y0, x1, y1);
 	}
@@ -163,12 +164,11 @@ bool Display::streamRect(int x, int y, int w, int h, DisplayStreamRasterFn raste
 
 	const int rw = x1 - x0 + 1;
 	const int rh = y1 - y0 + 1;
-	std::vector<std::uint16_t> pixels(static_cast<std::size_t>(rw) * static_cast<std::size_t>(rh));
+	std::vector<gea::framework::graphics::pixel::native_t> pixels(static_cast<std::size_t>(rw) * static_cast<std::size_t>(rh));
 	raster(pixels.data(), rw, rh, x0, y0, user);
 	for (int row = 0; row < rh; row++) {
-		std::memcpy(g_framebuffer + static_cast<std::size_t>(y0 + row) * kWidth + x0,
-		            pixels.data() + static_cast<std::size_t>(row) * rw,
-		            static_cast<std::size_t>(rw) * sizeof(std::uint16_t));
+		for (int col = 0; col < rw; ++col)
+			g_framebuffer[static_cast<std::size_t>(y0 + row) * kWidth + x0 + col] = pixels[static_cast<std::size_t>(row) * rw + col];
 	}
 	g_canvas.markDirty(x0, y0, x1, y1);
 	flush();
@@ -338,17 +338,17 @@ void Display::clip(int *x0, int *y0, int *x1, int *y1)
 	if (y1) *y1 = g_canvas_h - 1;
 }
 
-void Display::fillRect(int x, int y, int w, int h, uint16_t c) { if (framebuffer_target()) canvas()->fillRect(x, y, w, h, c); }
+void Display::fillRect(int x, int y, int w, int h, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->fillRect(x, y, w, h, c); }
 void Display::scrollRect(int x, int y, int w, int h, int dx, int dy) { if (framebuffer_target()) canvas()->scrollRect(x, y, w, h, dx, dy); }
 void Display::resetScrollRegion() { if (framebuffer_target()) canvas()->setScrollRegion(0, 0, 0); }
-void Display::strokeRect(int x, int y, int w, int h, uint16_t c) { if (framebuffer_target()) canvas()->strokeRect(x, y, w, h, c); }
-void Display::fillCircle(int cx, int cy, int r, uint16_t c) { if (framebuffer_target()) canvas()->fillCircle(cx, cy, r, c); }
-void Display::strokeCircle(int cx, int cy, int r, uint16_t c) { if (framebuffer_target()) canvas()->strokeCircle(cx, cy, r, c); }
-void Display::drawLine(int x0, int y0, int x1, int y1, uint16_t c) { if (framebuffer_target()) canvas()->drawLine(x0, y0, x1, y1, c); }
-void Display::drawArc(int cx, int cy, int r, int start_deg, int end_deg, uint16_t c) { if (framebuffer_target()) canvas()->drawArc(cx, cy, r, start_deg, end_deg, c); }
-void Display::fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, uint16_t c) { if (framebuffer_target()) canvas()->fillTriangle(x0, y0, x1, y1, x2, y2, c); }
-void Display::drawText(const char *text, int x, int y, uint16_t c, float scale) { if (framebuffer_target()) canvas()->drawText(text, x, y, c, scale); }
-void Display::drawTextFont(const char *text, int x, int y, uint16_t c, int font_id)
+void Display::strokeRect(int x, int y, int w, int h, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->strokeRect(x, y, w, h, c); }
+void Display::fillCircle(int cx, int cy, int r, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->fillCircle(cx, cy, r, c); }
+void Display::strokeCircle(int cx, int cy, int r, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->strokeCircle(cx, cy, r, c); }
+void Display::drawLine(int x0, int y0, int x1, int y1, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->drawLine(x0, y0, x1, y1, c); }
+void Display::drawArc(int cx, int cy, int r, int start_deg, int end_deg, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->drawArc(cx, cy, r, start_deg, end_deg, c); }
+void Display::fillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->fillTriangle(x0, y0, x1, y1, x2, y2, c); }
+void Display::drawText(const char *text, int x, int y, gea::framework::graphics::pixel::native_t c, float scale) { if (framebuffer_target()) canvas()->drawText(text, x, y, c, scale); }
+void Display::drawTextFont(const char *text, int x, int y, gea::framework::graphics::pixel::native_t c, int font_id)
 {
 	if (!framebuffer_target()) return;
 #ifdef GEA_EMBEDDED_HAS_GENERATED_FONTS
@@ -358,14 +358,14 @@ void Display::drawTextFont(const char *text, int x, int y, uint16_t c, int font_
 	canvas()->drawText(text, x, y, c, 1.0f);
 #endif
 }
-void Display::drawTextFontFamily(const char *text, int x, int y, uint16_t c, int family_id, int size_px) { if (framebuffer_target()) canvas()->drawTextFontFamily(text, x, y, c, family_id, size_px); }
-void Display::setPixel(int x, int y, uint16_t c) { if (framebuffer_target()) canvas()->fillRect(x, y, 1, 1, c); }
-void Display::fillRoundedRect(int x, int y, int w, int h, int tl, int tr, int br, int bl, uint16_t c) { if (framebuffer_target()) canvas()->fillRoundedRect(x, y, w, h, tl, tr, br, bl, c); }
-void Display::fillRoundedRectBoxesRgb565(const int16_t *xs, const int16_t *ys, int count, int w, int h, int tl, int tr, int br, int bl, const uint16_t *colors)
+void Display::drawTextFontFamily(const char *text, int x, int y, gea::framework::graphics::pixel::native_t c, int family_id, int size_px) { if (framebuffer_target()) canvas()->drawTextFontFamily(text, x, y, c, family_id, size_px); }
+void Display::setPixel(int x, int y, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->fillRect(x, y, 1, 1, c); }
+void Display::fillRoundedRect(int x, int y, int w, int h, int tl, int tr, int br, int bl, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->fillRoundedRect(x, y, w, h, tl, tr, br, bl, c); }
+void Display::fillRoundedRectBoxesRgb565(const int16_t *xs, const int16_t *ys, int count, int w, int h, int tl, int tr, int br, int bl, const gea::framework::graphics::pixel::native_t *colors)
 {
 	if (framebuffer_target()) canvas()->fillRoundedRectBoxesRgb565(xs, ys, count, w, h, tl, tr, br, bl, colors);
 }
-void Display::strokeRoundedRect(int x, int y, int w, int h, int tl, int tr, int br, int bl, int lw, uint16_t c) { if (framebuffer_target()) canvas()->strokeRoundedRect(x, y, w, h, tl, tr, br, bl, lw, c); }
+void Display::strokeRoundedRect(int x, int y, int w, int h, int tl, int tr, int br, int bl, int lw, gea::framework::graphics::pixel::native_t c) { if (framebuffer_target()) canvas()->strokeRoundedRect(x, y, w, h, tl, tr, br, bl, lw, c); }
 void Display::blitImage(const gea::framework::graphics::pixel::native_t *src, const uint8_t *alpha, int src_w, int src_h, int dx, int dy) { if (framebuffer_target()) canvas()->drawImage(src, alpha, src_w, src_h, dx, dy); }
 void Display::blitImageScaled(const gea::framework::graphics::pixel::native_t *src, const uint8_t *alpha, int src_w, int src_h, int dx, int dy, int dst_w, int dst_h) { if (framebuffer_target()) canvas()->drawImage(src, alpha, src_w, src_h, dx, dy, dst_w, dst_h); }
 void Display::setWorldOverlay(const uint16_t *, int, int, int, int) {}
@@ -387,7 +387,7 @@ bool Display::copySnapshotRgb565(uint16_t *dst, int pixel_capacity, int *width, 
 	if (width) *width = g_canvas_w;
 	if (height) *height = g_canvas_h;
 	if (!dst || pixel_capacity < pixels) return false;
-	std::memcpy(dst, g_framebuffer, static_cast<std::size_t>(pixels) * sizeof(std::uint16_t));
+	for (int i = 0; i < pixels; ++i) dst[i] = gea::framework::graphics::pixel::toRgb565(g_framebuffer[i]);
 	return true;
 }
 int Display::countNonBlackPixels(bool)
@@ -395,7 +395,9 @@ int Display::countNonBlackPixels(bool)
 	ensure_canvas();
 	int count = 0;
 	for (int i = 0; i < g_canvas_w * g_canvas_h; i++) {
-		if (g_framebuffer[i] != 0) count++;
+		int r, g, b, a;
+		gea::framework::graphics::pixel::unpackNative8(g_framebuffer[i], &r, &g, &b, &a);
+		if (r || g || b) count++;
 	}
 	return count;
 }
@@ -469,7 +471,7 @@ void applyOrientation(gea::framework::display::DisplayOrientation)
 	g_canvas_w = w;
 	g_canvas_h = h;
 	std::free(g_framebuffer);
-	g_framebuffer = static_cast<std::uint16_t *>(std::calloc((size_t)w * (size_t)h, sizeof(std::uint16_t)));
+	g_framebuffer = static_cast<gea::framework::graphics::pixel::native_t *>(std::calloc((size_t)w * (size_t)h, sizeof(gea::framework::graphics::pixel::native_t)));
 	g_canvas.bindPixels(g_framebuffer, w, h);
 	// Orientation is set from the app's top level inside Application::init,
 	// which runs on the main thread with the window already on screen.

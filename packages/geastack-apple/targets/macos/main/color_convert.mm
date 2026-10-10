@@ -7,33 +7,33 @@ namespace gea::macos {
 
 namespace {
 
-void unpack(std::uint16_t rgb565, CGFloat *r, CGFloat *g, CGFloat *b)
+void unpack(gea::framework::graphics::pixel::native_t color, CGFloat *r, CGFloat *g, CGFloat *b)
 {
-	int ri, gi, bi;
-	gea::framework::graphics::pixel::unpackRgb565(rgb565, &ri, &gi, &bi);
-	*r = static_cast<CGFloat>(ri) / 31.0;
-	*g = static_cast<CGFloat>(gi) / 63.0;
-	*b = static_cast<CGFloat>(bi) / 31.0;
+	int ri, gi, bi, ai;
+	gea::framework::graphics::pixel::unpackNative8(color, &ri, &gi, &bi, &ai);
+	*r = static_cast<CGFloat>(ri) / 255.0;
+	*g = static_cast<CGFloat>(gi) / 255.0;
+	*b = static_cast<CGFloat>(bi) / 255.0;
 }
 
 }  // namespace
 
-NSColor *rgb565ToNSColor(std::uint16_t rgb565)
+NSColor *nativeToNSColor(gea::framework::graphics::pixel::native_t color)
 {
 	CGFloat r, g, b;
-	unpack(rgb565, &r, &g, &b);
+	unpack(color, &r, &g, &b);
 	return [NSColor colorWithSRGBRed:r green:g blue:b alpha:1.0];
 }
 
-CGColor *rgb565ToCGColor(std::uint16_t rgb565)
+CGColor *nativeToCGColor(gea::framework::graphics::pixel::native_t color)
 {
 	CGFloat r, g, b;
-	unpack(rgb565, &r, &g, &b);
+	unpack(color, &r, &g, &b);
 	CGFloat comps[4] = {r, g, b, 1.0};
 	CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-	CGColorRef color = CGColorCreate(cs, comps);
+	CGColorRef result = CGColorCreate(cs, comps);
 	CGColorSpaceRelease(cs);
-	return color;
+	return result;
 }
 
 }  // namespace gea::macos

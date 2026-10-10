@@ -141,7 +141,7 @@ std::uint8_t *ensureScratch(size_t bytes)
 	if (self.nodeId >= tree.nodeCount()) return;
 	const auto *canvas = tree.canvas(self.nodeId);
 	if (!canvas) return;
-	const std::uint16_t *src = canvas->pixels();
+	const gea::framework::graphics::pixel::native_t *src = canvas->pixels();
 	const int w = canvas->width();
 	const int h = canvas->height();
 	if (!src || w <= 0 || h <= 0) return;
@@ -150,17 +150,17 @@ std::uint8_t *ensureScratch(size_t bytes)
 	std::uint8_t *dst = ensureScratch(bytes);
 	if (!dst) return;
 	for (int i = 0; i < w * h; i++) {
-		int r, g, b;
-		gea::framework::graphics::pixel::unpackRgb565(src[i], &r, &g, &b);
-		dst[i * 4 + 0] = static_cast<std::uint8_t>((r * 255 + 15) / 31);
-		dst[i * 4 + 1] = static_cast<std::uint8_t>((g * 255 + 31) / 63);
-		dst[i * 4 + 2] = static_cast<std::uint8_t>((b * 255 + 15) / 31);
-		dst[i * 4 + 3] = 0xFF;
+		int r, g, b, a;
+		gea::framework::graphics::pixel::unpackNative8(src[i], &r, &g, &b, &a);
+		dst[i * 4 + 0] = static_cast<std::uint8_t>(r);
+		dst[i * 4 + 1] = static_cast<std::uint8_t>(g);
+		dst[i * 4 + 2] = static_cast<std::uint8_t>(b);
+		dst[i * 4 + 3] = static_cast<std::uint8_t>(a);
 	}
 
 	CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
 	CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, dst, bytes, NULL);
-	const uint32_t bitmapInfo = (uint32_t)kCGImageAlphaNoneSkipLast | (uint32_t)kCGBitmapByteOrder32Big;
+	const uint32_t bitmapInfo = (uint32_t)kCGImageAlphaLast | (uint32_t)kCGBitmapByteOrder32Big;
 	CGImageRef img = CGImageCreate((size_t)w, (size_t)h, 8, 32, (size_t)w * 4,
 	                               cs, bitmapInfo,
 	                               provider, NULL, false, kCGRenderingIntentDefault);

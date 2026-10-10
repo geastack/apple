@@ -1,3 +1,4 @@
+/** @gea-host-no-property-writes */
 export declare function CMTimeMakeWithSeconds(seconds: number, preferredTimescale: number): CMTime
 
 export interface CMTime {

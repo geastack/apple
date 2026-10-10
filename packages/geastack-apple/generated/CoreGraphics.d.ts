@@ -1,5 +1,8 @@
+/** @gea-host-no-property-writes */
 export declare function CGRectMake(x: number, y: number, width: number, height: number): CGRect
+/** @gea-host-no-property-writes */
 export declare function CGPointMake(x: number, y: number): CGPoint
+/** @gea-host-no-property-writes */
 export declare function CGSizeMake(width: number, height: number): CGSize
 
 export interface CGPoint {

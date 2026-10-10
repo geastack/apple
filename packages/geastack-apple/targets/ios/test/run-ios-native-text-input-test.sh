@@ -120,7 +120,10 @@ require_framework_source "$GEA_ENGINE_DIR/ui/render.cpp" \
   "isNativeTextInputView" \
   "native input targets should identify input views before recording pixels"
 require_framework_source "$GEA_ENGINE_DIR/ui/render.cpp" \
-  "if (overlaps_clip && !nativeTextInput)" \
+  "const bool paintsOwnBox = overlaps_clip && n->computedStyle().visibility == 0;" \
+  "native input paint eligibility should retain clip and visibility checks"
+require_framework_source "$GEA_ENGINE_DIR/ui/render.cpp" \
+  "if (paintsOwnBox && !nativeTextInput)" \
   "native input targets should not record input view pixels"
 require_source "$ROOT/targets/ios/generate-xcode-project.mjs" \
   "GEA_EMBEDDED_ENABLE_NATIVE_TEXT_INPUT=1" \

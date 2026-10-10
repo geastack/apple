@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cstdint>
+#include "pixel.h"
 
 #ifdef __OBJC__
 @class NSColor;
@@ -9,10 +9,10 @@
 namespace gea::macos {
 
 #ifdef __OBJC__
-NSColor *rgb565ToNSColor(std::uint16_t rgb565);
+NSColor *nativeToNSColor(gea::framework::graphics::pixel::native_t color);
 #endif
 
 // Caller-owns the returned CGColorRef; release with CGColorRelease.
-struct CGColor *rgb565ToCGColor(std::uint16_t rgb565);
+struct CGColor *nativeToCGColor(gea::framework::graphics::pixel::native_t color);
 
 }  // namespace gea::macos
