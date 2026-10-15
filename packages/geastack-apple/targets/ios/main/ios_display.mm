@@ -325,6 +325,11 @@ DisplayFlushStageDetail Display::flushStageDetail() { return {}; }
 // Orientation is a device-panel concept; the iOS app rotates via UIKit, not by
 // rotating the framebuffer — so the framework rotation hook is a no-op here.
 void applyOrientation(gea::framework::display::DisplayOrientation) {}
+// Nor may the accelerometer rotate it. The hook is declared weak, but an
+// undefined weak function still fails to link on Apple platforms, so an app
+// that reads the orientation (tilt-breakout) needs the definition. macOS
+// answers the same way in macos_display.mm.
+bool autoRotateAllowed() { return false; }
 
 }  // namespace gea::platform::display
 
