@@ -5,7 +5,7 @@ Native Apple target support for GeaStack.
 This repo contains the packages and target templates that let Gea applications
 run as native Apple apps instead of browser views. The current focus is iOS, tvOS and
 macOS application shells, generated Apple SDK bindings, and experimental native
-JSX/SwiftUI helpers.
+JSX/SwiftUI helpers, plus a watch-only watchOS shell.
 
 ## What Is Here
 
@@ -17,6 +17,7 @@ JSX/SwiftUI helpers.
 | `packages/vite-plugin-apple-native` | Vite plugin that lowers JSX written against UIKit/AppKit view tags into native view construction, for apps that render through Apple views. |
 | `packages/geastack-apple/targets/ios` | UIKit target template (iOS and tvOS), Xcode project generator, simulator/device build script, and iOS tests. |
 | `packages/geastack-apple/targets/macos` | Cocoa/AppKit target template, generated resident-app registry, and macOS build script. |
+| `packages/geastack-apple/targets/watchos` | SwiftUI watch-only app shell over the gea framebuffer, Xcode project generator, and simulator/device build script. |
 
 ## Quick Start
 
@@ -62,8 +63,15 @@ npx gea build --target macos
 open dist/macos/<app-id>/<AppName>.app
 ```
 
-The CLI runs `targets/ios/build-ios.sh` and `targets/macos/build-macos.sh`
-from the installed package with the app's build configuration
+Build an Apple Watch app:
+
+```sh
+npx gea build --target watchos
+npx gea run --target watchos          # build, then install and launch on an Apple Watch simulator
+```
+
+The CLI runs `targets/ios/build-ios.sh`, `targets/macos/build-macos.sh` and
+`targets/watchos/build-watchos.sh` from the installed package with the app's build configuration
 (`gea.targets.<target>.build` and the geatsc plugins its dependencies
 provide). The scripts
 can also be run directly from the app folder, for example
@@ -83,9 +91,9 @@ npm run typecheck
 
 ## Dependencies
 
-- Xcode with the iOS, tvOS and macOS SDKs (whichever you target).
+- Xcode with the iOS, tvOS, macOS and watchOS SDKs (whichever you target).
 - Xcode command line tools.
-- An installed iOS or tvOS Simulator runtime for simulator runs.
+- An installed iOS, tvOS or watchOS Simulator runtime for simulator runs.
 - A configured Apple development team for signed device runs.
 - The rest of the stack comes from npm: an app that depends on
   `@geastack/apple` gets `@geastack/core`, `@geastack/compiler` and the other
@@ -99,6 +107,8 @@ npm run typecheck
   iOS and tvOS simulator and device build details.
 - [packages/geastack-apple/targets/macos/README.md](packages/geastack-apple/targets/macos/README.md):
   macOS renderer and target architecture.
+- [packages/geastack-apple/targets/watchos/README.md](packages/geastack-apple/targets/watchos/README.md):
+  watchOS shell, sizing, and simulator/device builds.
 
 ## How This Fits The Stack
 
