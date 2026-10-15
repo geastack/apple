@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const scriptPath = fileURLToPath(new URL('./build-macos.sh', import.meta.url))
-const script = readFileSync(scriptPath, 'utf8')
+// A Windows checkout has CRLF line ends; the patterns below are written for LF.
+const script = readFileSync(scriptPath, 'utf8').replace(/\r\n/g, '\n')
 
 assert.match(script, /GEA_MACOS_PIPELINE_CACHE:-1/, 'pipeline caching should be enabled by default')
 assert.match(

@@ -4,10 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { posixBash } from './test/posix-bash.mjs'
 
 const directory = path.dirname(fileURLToPath(import.meta.url))
 const helperPath = path.join(directory, 'build-child-lifecycle.sh')
-const helper = readFileSync(helperPath, 'utf8')
+// A Windows checkout has CRLF line ends, which bash will not read.
+const helper = readFileSync(helperPath, 'utf8').replace(/\r\n/g, '\n')
 assert.doesNotMatch(helper, /\bpkill\b/, 'cleanup must never use a global/name-based process kill')
 
 const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), 'gea-macos-process-tree-'))
@@ -30,17 +32,19 @@ try {
       '',
     ].join('\n'),
   )
+  // The helper's text stands in for `source`, so its line ends are this
+  // test's to normalize rather than the checkout's.
   const fixture = `
 set -euo pipefail
-source "$1"
-MACOS_BUILD_PROCESS_TABLE_FILE="$2"
+${helper}
+MACOS_BUILD_PROCESS_TABLE_FILE="$1"
 macos_build_process_tree "10 30" | sort -n
 `
-  const result = spawnSync('/bin/bash', ['-c', fixture, '_', helperPath, processTable], {
+  const result = spawnSync(posixBash, ['-c', fixture, '_', processTable], {
     encoding: 'utf8',
     timeout: 2000,
   })
-  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.status, 0, result.stderr || String(result.error))
   assert.deepEqual(result.stdout.trim().split('\n'), ['10', '11', '12', '13', '30', '31'])
   for (const unrelated of ['1', '20', '21', '22', '999']) {
     assert.equal(result.stdout.split('\n').includes(unrelated), false, `unrelated pid ${unrelated} leaked into kill tree`)

@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { posixBash } from './test/posix-bash.mjs'
 
 const scriptPath = fileURLToPath(new URL('./build-macos.sh', import.meta.url))
-const script = readFileSync(scriptPath, 'utf8')
+// A Windows checkout has CRLF line ends; the patterns and bash want LF.
+const script = readFileSync(scriptPath, 'utf8').replace(/\r\n/g, '\n')
 const namespaceFunction = script.match(/configure_macos_output_namespace\(\) \{[\s\S]*?\n\}/)?.[0] ?? ''
 
 assert.ok(namespaceFunction, 'could not extract configure_macos_output_namespace')
@@ -40,11 +42,11 @@ ${namespaceFunction}
 configure_macos_output_namespace "$1" "$2"
 printf '%s\n%s\n' "$MACOS_OUTPUT_SUBPATH" "$MACOS_BUILD_LABEL"
 `
-  return spawnSync('/bin/bash', ['-c', fixture, '_', appId, outputTag], { encoding: 'utf8', timeout: 2000 })
+  return spawnSync(posixBash, ['-c', fixture, '_', appId, outputTag], { encoding: 'utf8', timeout: 2000 })
 }
 
 const legacy = resolveNamespace('demo-app', '')
-assert.equal(legacy.status, 0, legacy.stderr)
+assert.equal(legacy.status, 0, legacy.stderr || String(legacy.error))
 assert.deepEqual(legacy.stdout.trim().split('\n'), ['demo-app', 'demo-app'], 'an unset tag must preserve the legacy cache path')
 
 const outline = resolveNamespace('demo-app', 'outline')

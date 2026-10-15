@@ -4,12 +4,21 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { posixBash } from './test/posix-bash.mjs'
 
 const scriptPath = fileURLToPath(new URL('./build-macos.sh', import.meta.url))
-const script = readFileSync(scriptPath, 'utf8')
+// A Windows checkout has CRLF line ends; the patterns and bash want LF.
+const script = readFileSync(scriptPath, 'utf8').replace(/\r\n/g, '\n')
 
 assert.match(script, /source "\$ROOT_DIR\/targets\/macos\/heavy-build-lock\.sh"/)
 assert.match(script, /source "\$ROOT_DIR\/targets\/macos\/build-child-lifecycle\.sh"/)
+// Every long-running build step is a tracked child, so an interrupt reaps it
+// before the locks are released (test-build-child-lifecycle.mjs runs that
+// cleanup against real processes where the host has POSIX signals).
+assert.match(script, /macos_run_tracked_child node "\$GEA_CORE\/scripts\/build-gea-vite-geatsc\.mjs"/)
+assert.match(script, /macos_run_tracked_child ninja -C "\$BUILD_DIR"/)
+assert.match(script, /macos_run_tracked_child "\$\{CLANGXX_CMD\[@\]\}"[^]*-x c\+\+-header/)
+assert.match(script, /macos_run_tracked_child clang\+\+[^]*"\$LINK_OUTPUT_TMP"/)
 
 const globalAcquire = script.indexOf('gea_acquire_heavy_build_lock "$HEAVY_BUILD_LOCK_PATH" macos "$MACOS_BUILD_LABEL"')
 const localAcquire = script.indexOf('\nacquire_build_lock\n', globalAcquire)
@@ -48,7 +57,7 @@ ${acquireFunction}
 acquire_build_lock
 test -f "$BUILD_LOCK_DIR/pid"
 `
-  const acquired = spawnSync('/bin/bash', ['-c', fixture, '_', absentDist], { encoding: 'utf8', timeout: 2000 })
+  const acquired = spawnSync(posixBash, ['-c', fixture, '_', absentDist], { encoding: 'utf8', timeout: 2000 })
   assert.equal(acquired.status, 0, acquired.stderr || 'clean build lock fixture failed')
 
   const missingParentFixture = `
@@ -58,7 +67,7 @@ BUILD_LOCK_DIR="$1/missing-parent/.build.lock"
 ${acquireFunction}
 if acquire_build_lock; then exit 9; fi
 `
-  const rejected = spawnSync('/bin/bash', ['-c', missingParentFixture, '_', temporaryRoot], { encoding: 'utf8', timeout: 2000 })
+  const rejected = spawnSync(posixBash, ['-c', missingParentFixture, '_', temporaryRoot], { encoding: 'utf8', timeout: 2000 })
   assert.equal(rejected.status, 0, rejected.stderr || 'non-contention mkdir failure fixture failed')
   assert.match(rejected.stderr, /Cannot create macOS build lock/)
 } finally {

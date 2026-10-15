@@ -5,14 +5,20 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+// This drives build-macos.sh's child cleanup with real POSIX signals -- TERM
+// delivered to bash, its traps, `wait` reaping the children -- and the BSD
+// `ps -axo pid=,ppid=` process table. Windows has neither (Node's SIGTERM there
+// is TerminateProcess, and Git Bash's ps takes no -o), so the release suite
+// does not run it on Windows; the platform test below is how it recognizes
+// that. Linux's procps reads the same ps spelling, so it runs there. Which
+// build steps run as tracked children is asserted in
+// test-heavy-build-lock-wiring.mjs, which runs on every host.
+if (process.platform === 'win32') {
+  throw new Error(`the macOS build child lifecycle needs POSIX signals and a BSD-style ps, which ${process.platform} lacks`)
+}
+
 const directory = path.dirname(fileURLToPath(import.meta.url))
 const helperPath = path.join(directory, 'build-child-lifecycle.sh')
-const buildScript = readFileSync(path.join(directory, 'build-macos.sh'), 'utf8')
-
-assert.match(buildScript, /macos_run_tracked_child node "\$GEA_CORE\/scripts\/build-gea-vite-geatsc\.mjs"/)
-assert.match(buildScript, /macos_run_tracked_child ninja -C "\$BUILD_DIR"/)
-assert.match(buildScript, /macos_run_tracked_child "\$\{CLANGXX_CMD\[@\]\}"[^]*-x c\+\+-header/)
-assert.match(buildScript, /macos_run_tracked_child clang\+\+[^]*"\$LINK_OUTPUT_TMP"/)
 
 const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), 'gea-macos-child-lifecycle-'))
 const workerPath = path.join(temporaryRoot, 'worker.sh')

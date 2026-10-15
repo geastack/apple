@@ -50,7 +50,12 @@ function createFixture(name, { objectContainsGate = true, executableContainsGate
   write(executable, executableContainsGate
     ? Buffer.concat([Buffer.from('executable\0'), Buffer.from(gate), Buffer.from('\0payload')])
     : Buffer.from('executable\0payload'))
-  write(depfile, `${object}: ${translationUnit} ${source}\n`)
+  // The macOS compiler names absolute POSIX paths. A Windows path has no make
+  // spelling the macOS pipeline reads (its drive colon is the rule separator),
+  // so there the fixture names the same files relative to the working
+  // directory, which the provenance check resolves them against.
+  const depPath = (file) => (process.platform === 'win32' ? path.relative(root, file).split(path.sep).join('/') : file)
+  write(depfile, `${depPath(object)}: ${depPath(translationUnit)} ${depPath(source)}\n`)
   write(linkSignature, `compiler=fixture\nobject=${object}\n`)
   git(dependency, 'init', '-q')
   git(dependency, 'config', 'user.name', 'Artifact Preflight Test')

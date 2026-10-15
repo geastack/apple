@@ -6,14 +6,17 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { compilerInputFingerprint } from './compiler-input-fingerprint.mjs'
+import { posixBash } from './test/posix-bash.mjs'
 
-const here = path.dirname(new URL(import.meta.url).pathname)
+const here = path.dirname(fileURLToPath(import.meta.url))
 const syncScript = path.join(here, 'sync-resources.mjs')
 const pruneScript = path.join(here, 'prune-generated-modules.mjs')
 const graphFreshnessScript = path.join(here, 'check-module-graph-freshness.mjs')
 const appleNativeFinalizer = path.join(here, 'finalize-apple-native-output.mjs')
-const buildScript = fs.readFileSync(path.join(here, 'build-macos.sh'), 'utf8')
+// A Windows checkout has CRLF line ends, which bash will not read.
+const buildScript = fs.readFileSync(path.join(here, 'build-macos.sh'), 'utf8').replace(/\r\n/g, '\n')
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gea-macos-pipeline-'))
 
 function extractShellFunction(name) {
@@ -34,7 +37,7 @@ function run(script, args) {
 
 function runCachedAppleOutputCheck(outDir, expectedState) {
   return spawnSync(
-    '/bin/bash',
+    posixBash,
     ['-c', `set -euo pipefail\n${cachedAppleOutputCheck}\napple_native_cached_output_is_current "$1" "$2"`, '_', outDir, expectedState],
     { encoding: 'utf8' },
   )
@@ -82,8 +85,8 @@ resolve_app_meta fixture
 test "$RESOLVED_APP_META" = $'/apps/fixture\\tindex.tsx\\tapple-native\\tFixture App'
 test "\${#APP_META_CACHE_IDS[@]}" -eq 1
 `
-  const resolverResult = spawnSync('/bin/bash', ['-c', resolverFixture], { encoding: 'utf8' })
-  assert.equal(resolverResult.status, 0, resolverResult.stderr)
+  const resolverResult = spawnSync(posixBash, ['-c', resolverFixture], { encoding: 'utf8' })
+  assert.equal(resolverResult.status, 0, resolverResult.stderr || String(resolverResult.error))
   assert.equal(
     resolverResult.stderr.match(/inspect-called/g)?.length ?? 0,
     1,
