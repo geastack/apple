@@ -299,6 +299,10 @@ const includePaths = [
   ...(process.env.GEA_FW_INCLUDE_DIRS || '').split('\n').filter(Boolean),
 ]
 
+// OTHER_LDFLAGS -no_deduplicate: ld64 folds functions with identical code by
+// default, address-taken ones included, and the runtime tells callables apart
+// by entry address (CallableObject::callWithReceiver finds a method's receiver
+// check by it), so a folded method template ran its twin's check.
 function buildSettings(configuration) {
   const preprocessorDefinitions = [
     'GEA_EMBEDDED_GIF_C_API=1',
@@ -331,6 +335,7 @@ function buildSettings(configuration) {
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				ONLY_ACTIVE_ARCH = ${configuration === 'Debug' ? 'YES' : 'NO'};
+				OTHER_LDFLAGS = ("$(inherited)", "-Wl,-no_deduplicate");
 				PRODUCT_BUNDLE_IDENTIFIER = ${q(bundleId)};
 				PRODUCT_NAME = ${q(appName)};
 				SDKROOT = iphoneos;

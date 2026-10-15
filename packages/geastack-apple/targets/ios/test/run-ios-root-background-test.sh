@@ -47,8 +47,10 @@ mkdir -p "$BUILD_DIR"
 # functions into their own sections lets the linker drop what nothing calls, so
 # the TU list stays the unit under test rather than the whole framework. Apple's
 # ld spells this `-dead_strip`; this target only ever builds on macOS.
+# -no_deduplicate keeps identical functions at distinct addresses, as the
+# runtime's address-keyed callables need (see macos/build-macos.sh).
 "$CXX_BIN" -std=c++20 \
-  -ffunction-sections -fdata-sections -Wl,-dead_strip \
+  -ffunction-sections -fdata-sections -Wl,-dead_strip -Wl,-no_deduplicate \
   "${GEA_FW_INCLUDES[@]}" \
   "$GEA_ENGINE_DIR/ui/core.cpp" \
   "$GEA_ENGINE_DIR/ui/tree_state.cpp" \

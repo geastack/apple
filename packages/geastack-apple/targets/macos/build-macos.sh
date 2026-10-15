@@ -1953,6 +1953,7 @@ LINK_SIGNATURE_TMP="$LINK_SIGNATURE_FILE.tmp.$$"
   printf 'compiler=%s\n' "$MACOS_COMPILER_VERSION"
   printf 'opt=%s\n' "$GEA_MACOS_OPT_LEVEL"
   printf 'debug=%s\n' "${GEA_MACOS_DEBUG_INFO:-}"
+  printf 'link=%s\n' -Wl,-no_deduplicate
   printf 'framework=%s\n' "${LINK_FRAMEWORKS[@]}"
   printf 'object=%s\n' "${OBJ_FILES[@]}"
 } > "$LINK_SIGNATURE_TMP"
@@ -1973,7 +1974,12 @@ if (( LINK_NEEDED != 0 )); then
   # Preserve the last complete executable until the linker succeeds. Clear both
   # completion markers first so a killed link is retried and re-signed.
   rm -f "$LINK_SIGNATURE_FILE" "$BUILD_DIR/codesign.complete" "$LINK_OUTPUT_TMP"
+  # -no_deduplicate: ld64 folds functions with identical code by default,
+  # address-taken ones included, and the runtime tells callables apart by
+  # entry address (CallableObject::callWithReceiver finds a method's receiver
+  # check by it), so a folded method template ran its twin's check.
   macos_run_tracked_child clang++ -std=c++20 -ObjC++ -fobjc-arc "$GEA_MACOS_OPT_LEVEL" ${GEA_MACOS_DEBUG_INFO} \
+    -Wl,-no_deduplicate \
     "${LINK_FRAMEWORKS[@]}" \
     "${OBJ_FILES[@]}" \
     -o "$LINK_OUTPUT_TMP"

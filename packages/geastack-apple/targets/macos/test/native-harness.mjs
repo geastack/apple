@@ -52,7 +52,9 @@ export async function runNativeTest(name, { sources = [], test, source, framewor
       run(file.endsWith('.c') ? 'clang' : 'clang++', [...options, '-c', file, '-o', object])))
   const executable = `${dist}/${name}`
   execFileSync('clang++', [
-    ...flags, '-fobjc-arc', '-Wl,-dead_strip',
+    // -no_deduplicate keeps identical functions at distinct addresses, as the
+    // runtime's address-keyed callables need (see build-macos.sh).
+    ...flags, '-fobjc-arc', '-Wl,-dead_strip', '-Wl,-no_deduplicate',
     ...jobs.map(([, object]) => object),
     ...sources.map((file) => `${main}/${file}`),
     '-x', 'objective-c++', test ?? '-', ...['AppKit', ...frameworks].flatMap((framework) => ['-framework', framework]), '-o', executable,
