@@ -219,7 +219,12 @@ show_simulator_device() {
   if [[ "${GEA_IOS_OPEN_SIMULATOR:-1}" != "1" ]]; then
     return 0
   fi
-  /usr/bin/open -a Simulator --args -CurrentDeviceUDID "$udid"
+  # Only a convenience: the device boots, installs and launches without the
+  # GUI. Xcode 27 replaced Simulator.app with DeviceHub.app (bundle id
+  # com.apple.dt.Devices), which shows every booted simulator.
+  /usr/bin/open -a Simulator --args -CurrentDeviceUDID "$udid" 2>/dev/null ||
+    /usr/bin/open -b com.apple.dt.Devices 2>/dev/null ||
+    echo "Could not open Simulator.app or DeviceHub.app; the simulator runs without a window." >&2
 }
 
 pick_ios_device() {
