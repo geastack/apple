@@ -5,7 +5,7 @@ Native Apple target support for GeaStack.
 This repo contains the packages and target templates that let Gea applications
 run as native Apple apps instead of browser views. The current focus is iOS and
 macOS application shells, generated Apple SDK bindings, and experimental native
-JSX/SwiftUI helpers.
+JSX/SwiftUI helpers, plus a watch-only watchOS shell.
 
 ## What Is Here
 
@@ -16,6 +16,7 @@ JSX/SwiftUI helpers.
 | `packages/geatsc-plugin-apple-native` | `geatsc` plugin metadata for Apple-native bindings. |
 | `packages/geastack-apple/targets/ios` | UIKit target template, Xcode project generator, simulator/device build script, and iOS tests. |
 | `packages/geastack-apple/targets/macos` | Cocoa/AppKit target template, generated resident-app registry, and macOS build script. |
+| `packages/geastack-apple/targets/watchos` | SwiftUI watch-only app shell over the gea framebuffer, Xcode project generator, and simulator/device build script. |
 
 ## Quick Start
 
@@ -40,6 +41,13 @@ npx gea build --target macos          # or: node_modules/@geastack/apple/targets
 open dist/macos/<app-id>/<AppName>.app
 ```
 
+Build an Apple Watch app:
+
+```sh
+npx gea build --target watchos        # or: node_modules/@geastack/apple/targets/watchos/build-watchos.sh <app-id> simulator
+npx gea run --target watchos          # build, then install and launch on an Apple Watch simulator
+```
+
 Build the Apple TypeScript helper packages from their package folders:
 
 ```sh
@@ -49,7 +57,7 @@ npm run typecheck
 
 ## Dependencies
 
-- Xcode with iOS and macOS SDKs.
+- Xcode with iOS, macOS and (for the watch target) watchOS SDKs.
 - Xcode command line tools.
 - An installed iOS Simulator runtime for simulator runs.
 - A configured Apple development team for signed device runs.
@@ -63,6 +71,8 @@ npm run typecheck
   iOS simulator and device build details.
 - [packages/geastack-apple/targets/macos/README.md](packages/geastack-apple/targets/macos/README.md):
   macOS renderer and target architecture.
+- [packages/geastack-apple/targets/watchos/README.md](packages/geastack-apple/targets/watchos/README.md):
+  watchOS shell, sizing, and simulator/device builds.
 
 ## How This Fits The Stack
 

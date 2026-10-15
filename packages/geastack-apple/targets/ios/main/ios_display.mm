@@ -30,6 +30,9 @@ int g_flush_depth = 2;
 int g_flush_calls = 0;
 int g_flush_rects = 0;
 int g_flush_pixels = 0;
+// Bumped whenever pixels reach the presented buffer, so a shell that snapshots
+// it (the watchOS SwiftUI host) can skip frames where nothing was presented.
+std::uint32_t g_presented_generation = 0;
 
 void ensure_canvas()
 {
@@ -49,6 +52,7 @@ void ensure_canvas()
 		return;
 	}
 	g_canvas.bindPixels(g_framebuffer, g_canvas_width, g_canvas_height);
+	g_presented_generation++;
 }
 
 void count_rect(int x0, int y0, int x1, int y1)
@@ -76,6 +80,7 @@ void copy_rect_to_presented(int x0, int y0, int x1, int y1)
 		const std::size_t offset = static_cast<std::size_t>(y) * g_canvas_width + x0;
 		std::copy_n(g_framebuffer + offset, width, g_presented_framebuffer + offset);
 	}
+	g_presented_generation++;
 }
 
 }  // namespace
@@ -338,6 +343,11 @@ extern "C" const std::uint32_t *gea_ios_display_presented_pixels()
 {
 	ensure_canvas();
 	return g_presented_framebuffer ? g_presented_framebuffer : g_framebuffer;
+}
+
+extern "C" std::uint32_t gea_ios_display_presented_generation()
+{
+	return g_presented_generation;
 }
 
 extern "C" void gea_ios_display_set_viewport_size(int width, int height)
