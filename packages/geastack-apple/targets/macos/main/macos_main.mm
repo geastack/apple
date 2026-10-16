@@ -352,6 +352,8 @@ static bool geaOwnsContourPress(int x, int y) {
 @property(nonatomic, strong) GeaSplitShell *splitShell;
 @property(nonatomic, strong) id geaToolbarDelegate; // NSToolbar.delegate is weak; retain it here
 @property(nonatomic, assign) BOOL geaDidFinishBoot;
+@property(nonatomic, assign) BOOL geaApplicationStarted;
+@property(nonatomic, strong) id geaWindowVisibleObserver;
 @property(nonatomic, assign) double geaProfileApplicationMs;
 - (void)installNativeRootView:(NSView *)view;
 - (void)startFrameTimer;
@@ -524,6 +526,38 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	[self.rootView setWantsLayer:YES];
 	[self.window setContentView:self.rootView];
 	gea::macos::background_test::present(self.window);
+
+	// A background test never shows its window, so there is nothing to wait for.
+	if (gea::macos::background_test::enabled()) {
+		[self startApplication];
+		return;
+	}
+
+	// Run the app once its window is on screen. The window shows only after the
+	// event loop has processed the launch's activation (about 0.1 s), and the
+	// app's top level can run for many seconds without returning to it. If the
+	// window does not become visible within a second, the app starts anyway.
+	AppDelegate * __weak weakSelf = self;
+	self.geaWindowVisibleObserver = [[NSNotificationCenter defaultCenter]
+		addObserverForName:NSWindowDidChangeOcclusionStateNotification
+		            object:self.window
+		             queue:nil
+		        usingBlock:^(NSNotification *notification) {
+			(void)notification;
+			if (weakSelf.window.occlusionState & NSWindowOcclusionStateVisible) [weakSelf startApplication];
+		}];
+	[self performSelector:@selector(startApplication) withObject:nil afterDelay:1.0];
+}
+
+- (void)startApplication
+{
+	if (self.geaApplicationStarted) return;
+	self.geaApplicationStarted = YES;
+	if (self.geaWindowVisibleObserver) [[NSNotificationCenter defaultCenter] removeObserver:self.geaWindowVisibleObserver];
+	self.geaWindowVisibleObserver = nil;
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(startApplication) object:nil];
+	gea_macos_smoke_log((self.window.occlusionState & NSWindowOcclusionStateVisible)
+		? "[gea-macos] window visible" : "[gea-macos] window not visible");
 
 	NSSize size = self.rootView.bounds.size;
 	if (gea::macos::thermalright::enabled()) {
@@ -950,7 +984,7 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 - (void)windowDidResize:(NSNotification *)notification
 {
  if (notification.object != self.window) return;
-	if (gea::macos::thermalright::enabled()) return;
+	if (gea::macos::thermalright::enabled() || !self.geaApplicationStarted) return;
 	if (!self.splitShell) {
 		const NSSize size = self.rootView.bounds.size;
 		const int width = static_cast<int>(size.width), height = static_cast<int>(size.height);
