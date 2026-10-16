@@ -10,7 +10,7 @@ import { promisify } from 'node:util'
 
 const run = promisify(execFile)
 const root = resolve(fileURLToPath(new URL('../../../../../', import.meta.url)))
-const pkg = `${root}/node_modules/@geastack`
+const pkg = resolve(process.env.GEA_NATIVE_TEST_PACKAGES_ROOT || `${root}/node_modules/@geastack`)
 const main = fileURLToPath(new URL('../main/', import.meta.url))
 const dist = `${root}/packages/geastack-apple/dist`
 
@@ -37,8 +37,9 @@ bool gea::platform::audio::AudioSystem::playFile(const std::string &) { return f
 
 const cpp = (dir) => readdirSync(`${pkg}/${dir}`).filter((file) => file.endsWith('.cpp')).map((file) => `${pkg}/${dir}/${file}`)
 
-// `test` is the test's source file, or `source` its text.
-export async function runNativeTest(name, { sources = [], test, source, frameworks = [], args = [[]] }) {
+// `test` is the test's source file, or `source` its text. `env` adds variables
+// to the executable's environment.
+export async function runNativeTest(name, { sources = [], test, source, frameworks = [], args = [[]], env: extraEnv = {} }) {
   const objects = `${dist}/${name}-objects`
   mkdirSync(objects, { recursive: true })
   const units = [...cpp('engine'), ...cpp('engine/ui'), ...cpp('elements/ui'), `${pkg}/core/events.cpp`]
@@ -46,7 +47,10 @@ export async function runNativeTest(name, { sources = [], test, source, framewor
   jobs.push([`${pkg}/engine/vendor/AnimatedGIF/AnimatedGIF.c`, `${objects}/gif.o`, ['-O0', '-DGEA_EMBEDDED_GIF_C_API']])
   writeFileSync(`${objects}/host-stubs.cpp`, hostStubs)
   jobs.push([`${objects}/host-stubs.cpp`, `${objects}/host-stubs.o`, flags])
-  const width = availableParallelism()
+  const requestedJobs = Number(process.env.GEA_NATIVE_TEST_JOBS || Math.min(4, availableParallelism()))
+  if (!Number.isSafeInteger(requestedJobs) || requestedJobs < 1 || requestedJobs > availableParallelism())
+    throw new Error('GEA_NATIVE_TEST_JOBS must be a positive integer within available parallelism')
+  const width = requestedJobs
   for (let at = 0; at < jobs.length; at += width)
     await Promise.all(jobs.slice(at, at + width).map(([file, object, options]) =>
       run(file.endsWith('.c') ? 'clang' : 'clang++', [...options, '-c', file, '-o', object])))
@@ -59,5 +63,7 @@ export async function runNativeTest(name, { sources = [], test, source, framewor
     ...sources.map((file) => `${main}/${file}`),
     '-x', 'objective-c++', test ?? '-', ...['AppKit', ...frameworks].flatMap((framework) => ['-framework', framework]), '-o', executable,
   ], { input: source, stdio: [source === undefined ? 'ignore' : 'pipe', 'inherit', 'inherit'] })
-  for (const argv of args) execFileSync(executable, argv, { stdio: 'inherit' })
+  // Tests that write snapshots may only write inside the package dist directory.
+  const env = { ...process.env, ...extraEnv, GEA_NATIVE_SNAPSHOT_DIR: dist }
+  for (const argv of args) execFileSync(executable, argv, { stdio: 'inherit', env })
 }

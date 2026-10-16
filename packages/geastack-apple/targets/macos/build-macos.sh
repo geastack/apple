@@ -571,6 +571,19 @@ generate_app() {
   elif [[ -f "$appDir/geatsc-plugin.mjs" ]]; then
     extraArgs+=(--extra-geatsc-plugin "$appDir/geatsc-plugin.mjs")
   fi
+  # Explicit app-owned host mappings are separate from dependency plugins.
+  # Resolve the same validated CLI record used by nativeSources below.
+  local declaredAppMetadata declaredAppPlugins declaredPluginPath
+  declaredAppMetadata="$(node "$GEA_CLI" apps inspect "$id" --json)" || return 1
+  declaredAppPlugins="$(node "$ROOT_DIR/targets/macos/app-compiler-plugins.mjs" "$declaredAppMetadata")" || return 1
+  while IFS= read -r declaredPluginPath; do
+    [[ -n "$declaredPluginPath" ]] || continue
+    local alreadySelected=0 selectedArgument
+    for selectedArgument in ${extraArgs[@]+"${extraArgs[@]}"}; do
+      if [[ "$selectedArgument" == "$declaredPluginPath" ]] || { [[ -f "$selectedArgument" ]] && [[ "$selectedArgument" -ef "$declaredPluginPath" ]]; }; then alreadySelected=1; fi
+    done
+    (( alreadySelected != 0 )) || extraArgs+=(--extra-geatsc-plugin "$declaredPluginPath")
+  done < <(node -e 'for(const p of JSON.parse(process.argv[1]).paths)console.log(p)' "$declaredAppPlugins")
   if [[ "$appRuntime" == "apple-native" ]]; then
     extraArgs+=(--apple-native)
   fi
@@ -580,7 +593,8 @@ generate_app() {
   local envSignature="GEA_BUILD_CONFIG=$(cat "$buildConfig")
 GEA_WEBGL_AUTO_INSTANCE=${GEA_WEBGL_AUTO_INSTANCE:-}
 GEA_WEBGL_AUTO_INSTANCE_TEST=${GEA_WEBGL_AUTO_INSTANCE_TEST:-}
-GEA_COMPILER_FINGERPRINT=${compilerFingerprint}"
+GEA_COMPILER_FINGERPRINT=${compilerFingerprint}
+GEA_APP_PLUGIN_FINGERPRINT=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).fingerprint)' "$declaredAppPlugins")"
 
   # Only when an alternate compiler was named, so the default signature -- and
   # therefore every existing generated directory's freshness -- is unchanged.
@@ -961,7 +975,7 @@ case "${GEA_MACOS_THERMALRIGHT_PRODUCT_ID:-}" in
     ;;
 esac
 if [[ "$THERMALRIGHT_DISPLAY_TARGET" == "0" ]]; then
-  CXX_DEFINES+=(-DGEA_EMBEDDED_PIXEL_FORMAT=1) # RGBA8888 for AppKit
+  CXX_DEFINES+=(-DGEA_EMBEDDED_PIXEL_FORMAT=1 -DGEA_CSS_FONT_STRETCH=1) # RGBA8888 and native variable-font style for AppKit
 fi
 if [[ "$THERMALRIGHT_DISPLAY_TARGET" == "1" ]]; then
   THERMALRIGHT_WIDTH="${GEA_MACOS_THERMALRIGHT_WIDTH:-$THERMALRIGHT_DEFAULT_WIDTH}"
@@ -1069,6 +1083,12 @@ MM_SOURCES=(
   "$ROOT_DIR/targets/macos/main/macos_host_device_control.mm"
   "$ROOT_DIR/targets/macos/main/macos_network.mm"
 )
+# Fail rather than silently linking weak transport fallbacks from an older core.
+FRAMEWORK_OBJCXX_SOURCES="$(gea_fw_objcxx_sources)" || exit 1
+[[ -n "$FRAMEWORK_OBJCXX_SOURCES" ]] || { echo "Missing framework Apple transport sources" >&2; exit 1; }
+while IFS= read -r framework_mm; do
+  [[ -n "$framework_mm" ]] && MM_SOURCES+=("$framework_mm")
+done <<< "$FRAMEWORK_OBJCXX_SOURCES"
 
 if [[ "${GEA_NATIVE_DEBUGGER:-0}" == "1" ]]; then
   MM_SOURCES+=("$GEA_DEBUGGER_NATIVE_SOURCE")
@@ -1945,6 +1965,16 @@ if [[ "$APPLE_NATIVE" == "1" ]]; then
   )
 fi
 
+# App-owned archive/framework inputs come only from the validated CLI record.
+APP_LINK_JSON="$(node "$GEA_CLI" apps inspect "$APP_ID" --json)"
+APP_LINK_RECORD="$(node -e 'const a=JSON.parse(process.argv[1]);const c=a.nativeLink?.macos;if(!c)throw Error("CLI lacks validated macos nativeLink");process.stdout.write(JSON.stringify(c))' "$APP_LINK_JSON")"
+APP_NATIVE_LIBRARIES=()
+while IFS= read -r library; do [[ -z "$library" ]] || APP_NATIVE_LIBRARIES+=("$library"); done < <(node -e 'for(const p of JSON.parse(process.argv[1]).nativeLibraries)console.log(p)' "$APP_LINK_RECORD")
+while IFS= read -r framework; do [[ -z "$framework" ]] || LINK_FRAMEWORKS+=(-framework "$framework"); done < <(node -e 'for(const p of JSON.parse(process.argv[1]).frameworks)console.log(p)' "$APP_LINK_RECORD")
+
+node "$GEA_CLI" apps sync-native-resources "$APP_ID" --target macos --output "$RES_DIR" > "$BUILD_DIR/native-resources.json"
+if [[ "$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).changed))' "$BUILD_DIR/native-resources.json")" == "true" ]]; then BUNDLE_CONTENT_CHANGED=1; fi
+
 LINK_OUTPUT="$MACOS_DIR/$APP_EXEC"
 LINK_OUTPUT_TMP="$LINK_OUTPUT.tmp.$$"
 LINK_SIGNATURE_FILE="$BUILD_DIR/link.sig"
@@ -1956,6 +1986,7 @@ LINK_SIGNATURE_TMP="$LINK_SIGNATURE_FILE.tmp.$$"
   printf 'link=%s\n' -Wl,-no_deduplicate
   printf 'framework=%s\n' "${LINK_FRAMEWORKS[@]}"
   printf 'object=%s\n' "${OBJ_FILES[@]}"
+  for library in ${APP_NATIVE_LIBRARIES[@]+"${APP_NATIVE_LIBRARIES[@]}"}; do shasum -a 256 "$library"; done
 } > "$LINK_SIGNATURE_TMP"
 
 LINK_NEEDED=0
@@ -1982,6 +2013,7 @@ if (( LINK_NEEDED != 0 )); then
     -Wl,-no_deduplicate \
     "${LINK_FRAMEWORKS[@]}" \
     "${OBJ_FILES[@]}" \
+    ${APP_NATIVE_LIBRARIES[@]+"${APP_NATIVE_LIBRARIES[@]}"} \
     -o "$LINK_OUTPUT_TMP"
   mv "$LINK_OUTPUT_TMP" "$LINK_OUTPUT"
   mv "$LINK_SIGNATURE_TMP" "$LINK_SIGNATURE_FILE"

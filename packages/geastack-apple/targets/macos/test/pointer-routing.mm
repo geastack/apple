@@ -28,9 +28,12 @@ static void require(bool condition, const char *message)
     if (!condition) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }
 
+// The renderer's own association: a node id plus the allocation it was bound to.
 static void tag(NSView *view, int node)
 {
     objc_setAssociatedObject(view, "gea.node_id", @(node), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(view, "gea.node_binding", [[GeaNativeBinding alloc] initWithNode:node],
+        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 int main(int argc, char **argv)
@@ -39,21 +42,22 @@ int main(int argc, char **argv)
         [NSApplication sharedApplication];
         using namespace gea::embedded::ui;
         using namespace gea::framework::events;
-        auto &state = treeState();
         auto &tree = Tree::instance();
         // Logical tree: grid -> block -> label. No app-specific handlers or
         // coordinate hit-testing workaround; listeners use normal bubbling.
-        state.nodeCount = 3;
-        state.nodes[0].parent = -1;
-        state.nodes[1].parent = 0;
-        state.nodes[2].parent = 1;
+        const int grid = tree.createView();
+        const int blockNode = tree.createView();
+        const int labelNode = tree.createText();
+        tree.setParent(blockNode, grid);
+        tree.setParent(labelNode, blockNode);
+        const int chain[] = {labelNode, blockNode, grid};
         std::vector<PointerEvent> received;
         bool stopAtBlock = false;
-        for (int node = 0; node < 3; ++node) {
+        for (int node : chain) {
             for (const char *type : {"pointerdown", "pointermove", "pointerup", "click"}) {
                 tree.setEventListener(node, type, [&, node](PointerEvent &event) {
                     received.push_back(event);
-                    if (node == 1 && stopAtBlock) event.stopPropagation();
+                    if (node == blockNode && stopAtBlock) event.stopPropagation();
                 });
             }
         }
@@ -64,10 +68,10 @@ int main(int argc, char **argv)
         [window.contentView addSubview:outer];
         NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(30, 40, 500, 500)];
         [outer addSubview:root];
-        tag(root, 0);
+        tag(root, grid);
         TestMouseView *block = [[TestMouseView alloc] initWithFrame:NSMakeRect(100, 100, 200, 80)];
         [root addSubview:block];
-        tag(block, 1);
+        tag(block, blockNode);
         GeaLabelTextField *label = [[GeaLabelTextField alloc] initWithFrame:NSMakeRect(10, 30, 100, 20)];
         label.stringValue = @"Block title";
         label.editable = NO;
@@ -76,7 +80,7 @@ int main(int argc, char **argv)
         label.bordered = NO;
         label.drawsBackground = NO;
         [block addSubview:label];
-        tag(label, 2);
+        tag(label, labelNode);
 
         GeaRootClickBridge *bridge = [GeaRootClickBridge new];
         bridge.rootView = root;
@@ -124,7 +128,7 @@ int main(int argc, char **argv)
                 PointerEventType::TouchMove, PointerEventType::TouchEnd};
             for (int i = 0; i < 12; ++i) {
                 const auto &event = received[i];
-                require(event.targetId == 2 && event.currentTargetId == 2 - i % 3,
+                require(event.targetId == labelNode && event.currentTargetId == chain[i % 3],
                     "AppKit must retain the label target and bubble through its ancestors");
                 require(event.type == types[i / 3], "AppKit must deliver mouse phases in order");
                 require(event.clientX == points[i / 3].x && event.clientY == 500 - points[i / 3].y,
@@ -133,14 +137,14 @@ int main(int argc, char **argv)
         } else if (test == "offset") {
             outer.frame = NSMakeRect(80, 60, 550, 550);
             fire(NSGestureRecognizerStateBegan, NSMakePoint(115, 115));
-            require(bridge.pressedNodeId == 1, "an offset root must hit the block, not the surrounding grid");
+            require(bridge.pressedNodeId == blockNode, "an offset root must hit the block, not the surrounding grid");
             received.clear();
             fire(NSGestureRecognizerStateEnded, NSMakePoint(115, 115));
             bridge.originX = 200;
             bridge.originY = 30;
             received.clear();
             fire(NSGestureRecognizerStateBegan, NSMakePoint(115, 145));
-            require(received.size() == 3 && received[0].targetId == 2,
+            require(received.size() == 3 && received[0].targetId == labelNode,
                 "an offset pane must preserve its label target and ancestors");
             require(received[0].clientX == 315 && received[0].clientY == 385,
                 "pane origin must be added to tree coordinates");
@@ -166,10 +170,10 @@ int main(int argc, char **argv)
                 "labels must forward mouse phases without entering NSTextField tracking");
         } else {
             fire(NSGestureRecognizerStateBegan, NSMakePoint(115, 145));
-            require(bridge.pressedNodeId == 2, "a label press must preserve the label target");
+            require(bridge.pressedNodeId == labelNode, "a label press must preserve the label target");
             require(received.size() == 3, "pointerdown must reach label, block and grid once each");
             for (int i = 0; i < 3; ++i) {
-                require(received[i].targetId == 2 && received[i].currentTargetId == 2 - i,
+                require(received[i].targetId == labelNode && received[i].currentTargetId == chain[i],
                     "bubbling must preserve target while changing currentTarget");
                 require(received[i].clientX == 115 && received[i].clientY == 355,
                     "pointerdown must carry top-down root coordinates");
@@ -177,7 +181,7 @@ int main(int argc, char **argv)
             received.clear();
             // Leave both the block and the window: the press retains its target.
             fire(NSGestureRecognizerStateChanged, NSMakePoint(700, -20));
-            require(received.size() == 3 && received[0].targetId == 2,
+            require(received.size() == 3 && received[0].targetId == labelNode,
                 "drag must stay on the pressed label and bubble to its block");
             received.clear();
             fire(NSGestureRecognizerStateEnded, NSMakePoint(700, -20));
@@ -193,7 +197,7 @@ int main(int argc, char **argv)
             stopAtBlock = false;
             received.clear();
             fire(NSGestureRecognizerStateBegan, NSMakePoint(10, 10));
-            require(received.size() == 1 && received[0].targetId == 0,
+            require(received.size() == 1 && received[0].targetId == grid,
                 "empty grid space must still target the grid");
             received.clear();
             fire(NSGestureRecognizerStateEnded, NSMakePoint(10, 10));
@@ -202,7 +206,7 @@ int main(int argc, char **argv)
             label.hidden = YES;
             received.clear();
             fire(NSGestureRecognizerStateBegan, NSMakePoint(115, 145));
-            require(received.size() == 2 && received[0].targetId == 1,
+            require(received.size() == 2 && received[0].targetId == blockNode,
                 "hidden labels must not intercept the block");
         }
         std::printf("native pointer routing passed: %s\n", test.c_str());

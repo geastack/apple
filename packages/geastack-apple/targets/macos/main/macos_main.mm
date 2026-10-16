@@ -1,3 +1,7 @@
+#include <cstdio>
+#include "host/timers.h"
+#include "host/worker.h"
+#include "ui/tree_events.h"
 #import <Cocoa/Cocoa.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/CADisplayLink.h>
@@ -9,8 +13,30 @@ extern void gea_macos_debugger_start();
 #include "font_registry.h"
 #include "macos_native_shell.h"
 #include "macos_renderer.h"
+#include "macos_background_test.h"
 #include "press_bridge.h"
 #include "thermalright_hid_display.h"
+
+// Optional app-owned process cleanup, before the native runtime/static teardown.
+// No callback on a skin/resident-app replacement; this is actual process exit.
+extern "C" __attribute__((weak)) void gea_native_application_terminate() {}
+namespace {
+void geaRetireNativeProcess() noexcept {
+ static bool retired = false; // Actual process exit on the application thread.
+ if (retired) return;
+ retired = true;
+ try { gea_native_application_terminate(); }
+ catch (...) { std::fputs("Gea: application termination callback failed; retiring SDK callbacks\n", stderr); }
+ try { gea::host::retireScheduledCallbacks(); }
+ catch (...) { std::fputs("Gea: scheduled callback retirement failed\n", stderr); }
+ gea::embedded::ui::retireNativeEventRealm();
+ try { gea::host::workers::retireMainContext(); }
+ catch (...) { std::fputs("Gea: main Context retirement failed\n", stderr); }
+}
+struct GeaNativeTerminationGuard {
+ ~GeaNativeTerminationGuard(){geaRetireNativeProcess();}
+};
+}
 
 namespace gea::macos { void installAppLauncherPlatform(const char *currentAppId); }
 namespace gea::macos { void installWifiDriver(); int nodeIdForView(NSView *view); }
@@ -72,6 +98,20 @@ static int geaCustomInputRoot()
   if (std::strcmp(tree.getAttribute(i,"data-gea-inputs"),"true")==0) return i;
  return -1;
 }
+// Keyboard routing is available to ordinary mounted native apps as well as
+// app-owned custom editors. Do not widen the pointer/custom-editor contract.
+static int geaKeyboardInputRoot() {
+ const int custom=geaCustomInputRoot();
+ return custom>=0?custom:gea::embedded::ui::Tree::instance().mountedRoot();
+}
+static int geaKeyboardTarget(int root) {
+ auto &tree=gea::embedded::ui::Tree::instance();
+ const int active=tree.activeInputId();
+ for(int id=active;id>=0 && id<tree.nodeCount();id=tree.node(id).parent)
+  if(id==root)return active;
+ return root;
+}
+#include "macos_key_event.h"
 // Authored silhouettes own their press layer; a rectangular engine fill would
 // paint outside their transparent corners. Ancestors cover image/text hits.
 static bool geaOwnsContourPress(int x, int y) {
@@ -82,6 +122,7 @@ static bool geaOwnsContourPress(int x, int y) {
 }
 @interface GeaContentView : NSView <NSTextInputClient>
 @property(nonatomic,copy) NSAttributedString *geaMarkedText;
+@property(nonatomic) BOOL geaInterpretingDispatchedKey;
 @property(nonatomic,strong) GCController *geaActiveController;
 @property(nonatomic) unsigned int geaGamepadButtons;
 @property(nonatomic) NSTimeInterval geaGamepadRepeat;
@@ -212,19 +253,50 @@ static bool geaOwnsContourPress(int x, int y) {
  for(int i=0;i<15;i++) if(pressed & (1u<<i)) [self geaSendKey:2000+i];
 }
 - (BOOL)isFlipped { return NO; }
-- (BOOL)acceptsFirstResponder { return geaCustomInputRoot()>=0; }
-- (void)geaSendKey:(int)code {
- const int root=geaCustomInputRoot();if(root<0)return;
- gea::framework::events::PointerEvent event;
- event.type=gea::framework::events::PointerEventType::KeyDown;
- event.targetId=root;event.keyCode=code;
- if(!gea::embedded::ui::dispatchDocumentKeyDown(event)) gea::embedded::ui::Tree::instance().dispatchEvent(event);
+- (BOOL)acceptsFirstResponder { return geaKeyboardInputRoot()>=0; }
+- (BOOL)becomeFirstResponder {const BOOL accepted=[super becomeFirstResponder];if(accepted)gea::macos::nativeRootFocusChanged(self,true,geaKeyboardTarget(geaKeyboardInputRoot()));return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)gea::macos::nativeRootFocusChanged(self,false,-1);return accepted;}
+
+- (BOOL)geaDispatchKey:(gea::framework::events::PointerEvent &)event {
+ const int root=geaKeyboardInputRoot();if(root<0)return NO;
+ event.targetId=geaKeyboardTarget(root);
+ event.target=gea::framework::events::EventTarget(event.targetId);
+ event.currentTargetId=root;
+ event.currentTarget=gea::framework::events::EventTarget(root);
+ gea::embedded::ui::dispatchRootKeyEvent(event, geaCustomInputRoot()>=0);
+ return event.defaultPrevented;
 }
-- (void)keyDown:(NSEvent *)event {
- if(geaCustomInputRoot()<0){[super keyDown:event];return;}
- if((event.modifierFlags & NSEventModifierFlagCommand) && [[event.charactersIgnoringModifiers lowercaseString] isEqualToString:@"a"]){[self geaSendKey:1001];return;}
- if([event.charactersIgnoringModifiers isEqualToString:@" "]){[self geaSendKey:32];if(![self hasMarkedText])[self insertText:@" " replacementRange:NSMakeRange(NSNotFound,0)];return;}
- [self interpretKeyEvents:@[event]];
+- (void)geaSendKey:(int)code {
+ gea::framework::events::PointerEvent event;
+ event.type=gea::framework::events::PointerEventType::KeyDown;event.keyCode=code;
+ [self geaDispatchKey:event];
+}
+- (void)keyDown:(NSEvent *)native {
+ if(geaKeyboardInputRoot()<0){[super keyDown:native];return;}
+ auto event=geaNativeKey(native,[self hasMarkedText],false);
+ // Preserve the app-owned editor's historical select-all command only there.
+ const bool selectAll=geaCustomInputRoot()>=0 && event.metaKey && event.key=="a";
+ if(selectAll)event.keyCode=1001;
+ if([self geaDispatchKey:event] || selectAll)return;
+ // Ordinary native text controls own AppKit text services themselves. Only
+ // the explicit app-owned editor root interprets text into Gea attributes.
+ if(geaCustomInputRoot()<0) {
+  // Unhandled navigation and commands retain AppKit's responder defaults.
+  // Handled Gea events returned above and cannot also move native focus.
+  if(native.keyCode==48) {
+   if(event.shiftKey)[self.window selectPreviousKeyView:self];
+   else [self.window selectNextKeyView:self];
+  } else [super keyDown:native];
+  return;
+ }
+ self.geaInterpretingDispatchedKey=YES;
+ @try { [self interpretKeyEvents:@[native]]; }
+ @finally { self.geaInterpretingDispatchedKey=NO; }
+}
+- (void)keyUp:(NSEvent *)native {
+ if(geaKeyboardInputRoot()<0){[super keyUp:native];return;}
+ auto event=geaNativeKey(native,[self hasMarkedText],true);
+ [self geaDispatchKey:event];
 }
 - (void)insertText:(id)text replacementRange:(NSRange)range {
  (void)range;const int root=geaCustomInputRoot();if(root<0)return;
@@ -247,7 +319,7 @@ static bool geaOwnsContourPress(int x, int y) {
  else if(selector==@selector(insertNewline:))code=13;
  else if(selector==@selector(insertTab:))code=9;
  else if(selector==@selector(cancelOperation:))code=27;
- if(code)[self geaSendKey:code];
+ if(code && !self.geaInterpretingDispatchedKey)[self geaSendKey:code];
 }
 - (void)paste:(id)sender { (void)sender;NSString *value=[[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];if(value)[self insertText:value replacementRange:NSMakeRange(NSNotFound,0)]; }
 - (void)copy:(id)sender {
@@ -451,8 +523,7 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	self.rootView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 	[self.rootView setWantsLayer:YES];
 	[self.window setContentView:self.rootView];
-	[self.window makeKeyAndOrderFront:nil];
-	[NSApp activateIgnoringOtherApps:YES];
+	gea::macos::background_test::present(self.window);
 
 	NSSize size = self.rootView.bounds.size;
 	if (gea::macos::thermalright::enabled()) {
@@ -577,10 +648,12 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 		[self.frameDisplayLink invalidate];
 		self.frameDisplayLink = nil;
 	}
+	geaRetireNativeProcess();
 }
 
 - (void)tick
 {
+	gea::macos::background_test::checkApplication(NSApp);
 	if (getenv("GEA_MACOS_TICK_DEBUG")) {
 		static int tickCount = 0;
 		tickCount++;
@@ -865,13 +938,18 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	view.frame = [self.window.contentView bounds];
 	view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 	[self.window setContentView:view];
-	[self.window makeKeyAndOrderFront:nil];
-	[NSApp activateIgnoringOtherApps:YES];
+	gea::macos::background_test::present(self.window);
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification
+{
+ if (notification.object != self.window) return;
+ gea::embedded::ui::dispatchWindowLifecycleEvent(gea::framework::events::PointerEventType::WindowBlur);
 }
 
 - (void)windowDidResize:(NSNotification *)notification
 {
-	(void)notification;
+ if (notification.object != self.window) return;
 	if (gea::macos::thermalright::enabled()) return;
 	if (!self.splitShell) {
 		const NSSize size = self.rootView.bounds.size;
@@ -884,6 +962,7 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 			gea::embedded::ui::setViewportMetrics(width, height, 1.0);
 		}
 	}
+	gea::embedded::ui::dispatchWindowLifecycleEvent(gea::framework::events::PointerEventType::WindowResize);
 	// Sync immediately on resize end too; the live-mode timer covers the
 	// drag, this handles the final snap.
 	[self tick];
@@ -958,8 +1037,7 @@ void gea::apple::AppKit::installRootViewController(gea::apple::AppKit::NSViewCon
 			[delegate.window setContentSize:wantedContent];
 			[delegate.window center];
 		}
-		[delegate.window makeKeyAndOrderFront:nil];
-		[NSApp activateIgnoringOtherApps:YES];
+		gea::macos::background_test::present(delegate.window);
 		// Clear the initial first responder so an editable NSTextField/NSTextView
 		// in the content doesn't grab focus (drawing a blue focus ring + selecting
 		// its text) the instant the window opens — matching a freshly launched
@@ -1128,14 +1206,17 @@ void gea::apple::AppKit::setScrollDocumentTopAligned(gea::apple::AppKit::NSScrol
 
 int main(int argc, const char *argv[])
 {
+	GeaNativeTerminationGuard terminationGuard;
 	(void)argc;
 	(void)argv;
 	@autoreleasepool {
 		gea_macos_smoke_log("[gea-macos] main entered");
+		const bool backgroundTest = gea::macos::background_test::enabled();
 		NSApplication *app = [NSApplication sharedApplication];
 		AppDelegate *delegate = [[AppDelegate alloc] init];
 		[app setDelegate:delegate];
-		[app setActivationPolicy:gea::macos::thermalright::enabled()
+		if (backgroundTest) gea::macos::background_test::configure(app);
+		else [app setActivationPolicy:gea::macos::thermalright::enabled()
 			? NSApplicationActivationPolicyProhibited
 			: NSApplicationActivationPolicyRegular];
 		gea_macos_smoke_log("[gea-macos] before finishLaunching");

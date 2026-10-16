@@ -5,6 +5,12 @@
 #import <CoreImage/CoreImage.h>
 
 #include "macos_renderer.h"
+#include "ui/selector.h"
+#include "ui/control_commit.h"
+#include "ui/input_retirement.h"
+#include <exception>
+#include <stdexcept>
+#include "macos_control_admission.h"
 #include "canvas_view.h"
 #include "color_convert.h"
 #include "font_registry.h"
@@ -20,10 +26,68 @@
 
 #include <algorithm>
 #include <cmath>
+#include <charconv>
+#include <limits>
 #include <string>
 #include <cstring>
 #include <cstdlib>
 #include <vector>
+
+// Native views retain the allocation they were bound to. A queued callback
+// must not authenticate a reused integer id by looking up its NEW owner.
+@interface GeaNativeBinding : NSObject {
+@public
+ int nodeId;
+ gea::framework::identity::Owner owner;
+ BOOL active;
+}
+- (instancetype)initWithNode:(int)node;
+@end
+@implementation GeaNativeBinding
+- (instancetype)initWithNode:(int)node {
+ if((self=[super init])){nodeId=node;owner=gea::framework::identity::node(node);active=YES;}
+ return self;
+}
+@end
+static bool geaViewBindingCurrent(NSView *view,int node) {
+ GeaNativeBinding *binding=objc_getAssociatedObject(view,"gea.node_binding");
+ return binding && binding->active && binding->nodeId==node && gea::framework::identity::current(node,binding->owner);
+}
+
+static bool geaControlAdmitted(NSView *view,int node) {
+ GeaNativeBinding *binding=objc_getAssociatedObject(view,"gea.node_binding");
+ return binding && binding->active && binding->nodeId==node && gea::macos::controlAdmitted(node,binding->owner);
+}
+
+// Native responder leases retain the allocation captured at the actual focus
+// transition. The view is weak: retaining focus never extends a native view.
+struct GeaFocusLease { __weak NSView* view=nil; gea::embedded::ui::NodeHandle node; };
+static GeaFocusLease geaFocused;
+static gea::embedded::ui::NodeHandle geaPendingFocus;
+static bool geaOwnsResponder(NSView*view){if(!view||!view.window)return false;NSResponder*first=view.window.firstResponder;if(first==view)return true;return [view isKindOfClass:NSTextField.class]&&[(NSTextField*)view currentEditor]&&first==[(NSTextField*)view currentEditor];}
+static void geaClearFocusedView(NSView*view,bool descendants=false){
+ NSView*focused=geaFocused.view;if(!focused||!(focused==view||(descendants&&[focused isDescendantOf:view])))return;
+ auto old=geaFocused.node;geaFocused.view=nil;geaFocused.node={};
+ auto&t=gea::embedded::ui::Tree::instance();if(old.valid()&&t.activeInputId()==old.id())t.setActiveInput(-1);
+}
+static void geaNativeFocusBegan(NSView*view,int node,bool acceptedTransition=false){
+ if(!view.window||(!acceptedTransition&&!geaOwnsResponder(view))||!geaControlAdmitted(view,node))return;
+ gea::embedded::ui::NodeHandle owner(node);if(!owner.isConnected())return;
+ geaFocused.view=view;geaFocused.node=owner;gea::embedded::ui::Tree::instance().setActiveInput(node);
+}
+static void geaNativeFocusEnded(NSView*view){geaClearFocusedView(view);}
+static void geaRetireNativeView(NSView *view) {
+ GeaNativeBinding *binding=objc_getAssociatedObject(view,"gea.node_binding");
+ // A generic logical node can focus the root responder, which is an ancestor
+ // rather than a descendant of its materialized view. Retire its exact subtree
+ // allocation as well; ordinary responder-end callbacks stay exact-view only.
+ if(binding&&binding->active&&gea::framework::identity::current(binding->nodeId,binding->owner)&&geaFocused.node.valid()&&gea::embedded::ui::Tree::instance().containsNode(binding->nodeId,geaFocused.node.id())){
+  NSView*focused=geaFocused.view;geaClearFocusedView(focused);
+ }else geaClearFocusedView(view,true);
+ if(binding)binding->active=NO;
+ PressBridge *bridge=objc_getAssociatedObject(view,"gea.press_bridge");
+ if(bridge)bridge.nodeId=-1;
+}
 
 // NSTextField defaults to consuming mouse events even when bezeled / editable /
 // selectable are all NO. Keep labels in hit testing so the press bridge can
@@ -109,7 +173,7 @@
 // `keydown` events with the corresponding `keyCode` value JS apps expect
 // (matching the browser keyCode table for the few keys the framework cares
 // about — Enter, Backspace, arrows, Escape, Tab).
-@interface GeaInputField : NSTextField <NSTextFieldDelegate>
+@interface GeaInputField : NSTextField <NSTextFieldDelegate> { gea::embedded::ui::ControlCommit _geaCommit; BOOL _geaEditing; }
 @property(nonatomic, assign) int nodeId;
 @end
 
@@ -150,7 +214,7 @@ static int geaKeyCodeForCommand(SEL sel)
 	using gea::framework::events::PointerEvent;
 	if (_nodeId < 0) return;
 	auto &tree = gea::embedded::ui::Tree::instance();
-	if (_nodeId >= tree.nodeCount()) return;
+	if (!geaControlAdmitted(self,_nodeId)) return;
 	PointerEvent event;
 	event.type = type;
 	event.targetId = _nodeId;
@@ -158,18 +222,24 @@ static int geaKeyCodeForCommand(SEL sel)
 	tree.dispatchEvent(event);
 }
 
+- (BOOL)becomeFirstResponder {if(!geaControlAdmitted(self,_nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,_nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
+- (void)controlTextDidBeginEditing:(NSNotification *)note { (void)note;if(!geaControlAdmitted(self,_nodeId))return;geaNativeFocusBegan(self,_nodeId);_geaCommit.begin(_nodeId);_geaEditing=YES; }
+- (void)controlTextDidEndEditing:(NSNotification *)note { (void)note;geaNativeFocusEnded(self);if(!_geaEditing)return;_geaEditing=NO;if(!geaControlAdmitted(self,_nodeId))return;auto commit=_geaCommit;commit.commit(); }
 - (void)controlTextDidChange:(NSNotification *)note
 {
 	(void)note;
 	if (_nodeId < 0) return;
 	auto &tree = gea::embedded::ui::Tree::instance();
-	if (_nodeId >= tree.nodeCount()) return;
+	if (!geaControlAdmitted(self,_nodeId)) return;
+	if(!_geaEditing){_geaCommit.begin(_nodeId);_geaEditing=YES;}
 	const std::string newValue = std::string([self.stringValue UTF8String] ?: "");
 	// Mirror the current text into the node's `value` attribute. The
 	// framework's DOM-shim reads `event.currentTarget.value` by falling
 	// through to `getAttribute("value")`, so the user's onInput handler sees
 	// the latest text without us needing a dedicated event-payload slot.
 	tree.setAttribute(_nodeId, "value", newValue.c_str());
+	_geaCommit.edited(_nodeId);
 	[self dispatchEventOfType:gea::framework::events::PointerEventType::Input withKeyCode:0];
 }
 
@@ -198,7 +268,7 @@ static int geaKeyCodeForCommand(SEL sel)
 // listens for text changes and reflects them to the node's `value` attribute
 // so user code reading `event.currentTarget.value` (or observing the store
 // bound to it) sees the latest text.
-@interface GeaTextAreaView : NSTextView <NSTextViewDelegate>
+@interface GeaTextAreaView : NSTextView <NSTextViewDelegate> { gea::embedded::ui::ControlCommit _geaCommit; BOOL _geaEditing; }
 @property(nonatomic, assign) int nodeId;
 @property(nonatomic, assign) BOOL suppressChangeNotification;
 @end
@@ -224,6 +294,10 @@ static int geaKeyCodeForCommand(SEL sel)
 	return self;
 }
 
+- (BOOL)becomeFirstResponder {if(!geaControlAdmitted(self,_nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,_nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
+- (void)textDidBeginEditing:(NSNotification *)note { (void)note;if(!geaControlAdmitted(self,_nodeId))return;geaNativeFocusBegan(self,_nodeId);_geaCommit.begin(_nodeId);_geaEditing=YES; }
+- (void)textDidEndEditing:(NSNotification *)note { (void)note;geaNativeFocusEnded(self);if(!_geaEditing)return;_geaEditing=NO;if(!geaControlAdmitted(self,_nodeId))return;auto commit=_geaCommit;commit.commit(); }
 - (void)textDidChange:(NSNotification *)note
 {
 	(void)note;
@@ -231,9 +305,11 @@ static int geaKeyCodeForCommand(SEL sel)
 	using gea::framework::events::PointerEvent;
 	using gea::framework::events::PointerEventType;
 	auto &tree = gea::embedded::ui::Tree::instance();
-	if (_nodeId >= tree.nodeCount()) return;
+	if (!geaControlAdmitted(self,_nodeId)) return;
+	if(!_geaEditing){_geaCommit.begin(_nodeId);_geaEditing=YES;}
 	const std::string newValue = std::string([self.string UTF8String] ?: "");
 	tree.setAttribute(_nodeId, "value", newValue.c_str());
+	_geaCommit.edited(_nodeId);
 	PointerEvent event;
 	event.type = PointerEventType::Input;
 	event.targetId = _nodeId;
@@ -249,17 +325,19 @@ static bool geaBooleanAttribute(int nodeId, const char *name)
 	return tree.hasAttribute(nodeId, name) && (!value || (std::strcmp(value, "false") != 0 && std::strcmp(value, "0") != 0));
 }
 
-static void geaControlInput(int nodeId, const char *value, const char *checked = nullptr)
+static void geaControlInput(NSView *view, int nodeId, const char *value, const char *checked = nullptr)
 {
 	auto &tree = gea::embedded::ui::Tree::instance();
-	if (nodeId < 0 || nodeId >= tree.nodeCount()) return;
-	if (geaBooleanAttribute(nodeId, "disabled")) return;
+	if (!geaControlAdmitted(view,nodeId)) return;
+	gea::embedded::ui::ControlCommit commit;commit.begin(nodeId,checked?"checked":"value");
 	if (value) tree.setAttribute(nodeId, "value", value);
 	if (checked) tree.setAttribute(nodeId, "checked", checked);
+	commit.edited(nodeId);
 	gea::framework::events::PointerEvent event;
 	event.type = gea::framework::events::PointerEventType::Input;
 	event.targetId = nodeId;
 	tree.dispatchEvent(event);
+	commit.commit();
 }
 
 @interface GeaChoice : NSButton
@@ -267,11 +345,14 @@ static void geaControlInput(int nodeId, const char *value, const char *checked =
 @property(nonatomic, assign) BOOL radio;
 @end
 @implementation GeaChoice
+- (BOOL)becomeFirstResponder {if(!geaControlAdmitted(self,self.nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,self.nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
 - (void)geaChanged:(id)sender
 {
 	(void)sender;
+	if (!geaControlAdmitted(self,self.nodeId)) return;
 	if (self.radio) self.state = NSControlStateValueOn;
-	geaControlInput(self.nodeId, nullptr, self.state == NSControlStateValueOn ? "true" : "false");
+	geaControlInput(self, self.nodeId, nullptr, self.state == NSControlStateValueOn ? "true" : "false");
 }
 @end
 
@@ -279,11 +360,13 @@ static void geaControlInput(int nodeId, const char *value, const char *checked =
 @property(nonatomic, assign) int nodeId;
 @end
 @implementation GeaPopUp
+- (BOOL)becomeFirstResponder {if(!geaControlAdmitted(self,self.nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,self.nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
 - (void)geaChanged:(id)sender
 {
 	(void)sender;
 	NSString *value = self.selectedItem.representedObject ?: self.selectedItem.title;
-	geaControlInput(self.nodeId, [value UTF8String] ?: "");
+	geaControlInput(self, self.nodeId, [value UTF8String] ?: "");
 }
 @end
 
@@ -291,10 +374,12 @@ static void geaControlInput(int nodeId, const char *value, const char *checked =
 @property(nonatomic, assign) int nodeId;
 @end
 @implementation GeaStepper
+- (BOOL)becomeFirstResponder {if(!geaControlAdmitted(self,self.nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,self.nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
 - (void)geaChanged:(id)sender
 {
 	(void)sender;
-	geaControlInput(self.nodeId, [[NSString stringWithFormat:@"%.15g", self.doubleValue] UTF8String]);
+	geaControlInput(self, self.nodeId, [[NSString stringWithFormat:@"%.15g", self.doubleValue] UTF8String]);
 }
 @end
 
@@ -309,6 +394,7 @@ static void geaControlInput(int nodeId, const char *value, const char *checked =
 @interface GeaRootClickBridge : NSObject <NSGestureRecognizerDelegate>
 @property(nonatomic, weak) NSView *rootView;
 @property(nonatomic, assign) int pressedNodeId;  // -1 when no press in flight
+@property(nonatomic,strong) GeaNativeBinding *pressedBinding;
 // Tree-space origin of rootView: 0,0 for a window root, the pane node's
 // layout.x/y for a split-view pane.
 @property(nonatomic, assign) int originX;
@@ -319,6 +405,8 @@ static void geaControlInput(int nodeId, const char *value, const char *checked =
 @property(nonatomic, assign) int lastY;
 @property(nonatomic, assign) BOOL dragged;
 - (void)fire:(NSGestureRecognizer *)gr;
+@property(nonatomic, assign) BOOL ending;
+- (BOOL)closeInputBinding:(GeaNativeBinding *)binding;
 @end
 
 namespace gea::macos {
@@ -366,12 +454,24 @@ int nodeIdForView(NSView *view)
 {
 	while (view) {
 		NSNumber *n = objc_getAssociatedObject(view, "gea.node_id");
-		if (n) return n.intValue;
+		if (n) return geaViewBindingCurrent(view,n.intValue)?n.intValue:-1;
 		view = view.superview;
 	}
 	return -1;
 }
 }  // namespace gea::macos
+
+static void geaEmitRootCancellation(const gea::embedded::ui::NodeHandle &owner,int x,int y) {
+ if(!owner.valid())return;
+ gea::framework::events::PointerEvent event{};
+ event.type=gea::framework::events::PointerEventType::PointerCancel;event.targetId=owner.id();event.pointerId=1;
+ event.x=event.clientX=event.pageX=event.screenX=x;event.y=event.clientY=event.pageY=event.screenY=y;
+ event.changedTouchesLength=1;event.changedTouches[0].identifier=1;
+ event.changedTouches[0].target=gea::framework::events::EventTarget(owner.id());
+ event.changedTouches[0].clientX=event.changedTouches[0].pageX=event.changedTouches[0].screenX=x;
+ event.changedTouches[0].clientY=event.changedTouches[0].pageY=event.changedTouches[0].screenY=y;
+ gea::embedded::ui::Tree::instance().dispatchEvent(event);
+}
 
 @implementation GeaRootClickBridge
 
@@ -404,6 +504,15 @@ int nodeIdForView(NSView *view)
 		if (nodeId < 0) return;
 		auto &tree = gea::embedded::ui::Tree::instance();
 		if (nodeId >= tree.nodeCount()) return;
+        if(!self.pressedBinding || !self.pressedBinding->active || self.pressedBinding->nodeId!=nodeId ||
+           !gea::framework::identity::current(nodeId,self.pressedBinding->owner))return;
+        bool retireDisabled=false;
+        if(type!=PointerEventType::PointerCancel && !gea::macos::controlAdmitted(nodeId,self.pressedBinding->owner)) {
+          if(type==PointerEventType::TouchStart || type==PointerEventType::Click) {
+            self.pressedNodeId=-1;self.pressedBinding=nil;return;
+          }
+          type=PointerEventType::PointerCancel;retireDisabled=true;
+        }
         gea::macos::publishControlEventBounds(nodeId);
         PointerEvent ev;
         ev.type = type;
@@ -433,6 +542,7 @@ int nodeIdForView(NSView *view)
 		ev.targetTouches[0] = point;
 		ev.changedTouches[0] = point;
 		tree.dispatchEvent(ev);
+        if(retireDisabled){self.pressedNodeId=-1;self.pressedBinding=nil;}
 	};
 
 	switch (gr.state) {
@@ -453,6 +563,7 @@ int nodeIdForView(NSView *view)
 		// phases dispatch to the same target even if the cursor drifts.
 		NSView *hit = gea::macos::hitTestInRoot(root, pInRoot);
 		self.pressedNodeId = gea::macos::nodeIdForView(hit);
+		self.pressedBinding=[[GeaNativeBinding alloc] initWithNode:self.pressedNodeId];self.ending=NO;
 		self.startX = x;
 		self.startY = y;
 		self.lastX = x;
@@ -474,14 +585,33 @@ int nodeIdForView(NSView *view)
 	case NSGestureRecognizerStateCancelled:
 	case NSGestureRecognizerStateFailed: {
 		const int nodeId = self.pressedNodeId;
-		self.pressedNodeId = -1;
-		fireEvent(nodeId, PointerEventType::TouchEnd, self.lastX, self.lastY, false);
-		if (gr.state == NSGestureRecognizerStateEnded && !self.dragged) fireEvent(nodeId, PointerEventType::Click, self.lastX, self.lastY, false);
+		GeaNativeBinding *terminalBinding=self.pressedBinding;
+		self.pressedNodeId = -1;self.ending=YES;
+        // Retire this terminal lease even when a user callback throws. A
+        // reentrant Begin owns a different binding and must survive this frame.
+        auto closeTerminal = [&]() {
+          if(self.pressedBinding==terminalBinding){self.pressedBinding=nil;self.ending=NO;}
+        };
+        try {
+          fireEvent(nodeId, gr.state==NSGestureRecognizerStateEnded?PointerEventType::TouchEnd:PointerEventType::PointerCancel, self.lastX, self.lastY, false);
+          if (self.pressedBinding==terminalBinding && gr.state == NSGestureRecognizerStateEnded && !self.dragged) fireEvent(nodeId, PointerEventType::Click, self.lastX, self.lastY, false);
+        } catch (...) {
+          closeTerminal();
+          throw;
+        }
+        closeTerminal();
 		break;
 	}
 	default:
 		break;
 	}
+}
+
+- (BOOL)closeInputBinding:(GeaNativeBinding *)binding {
+ if(!binding || self.pressedBinding!=binding)return NO;
+ const BOOL emit=!self.ending && gea::framework::identity::current(binding->nodeId,binding->owner);
+ binding->active=NO;self.pressedBinding=nil;self.pressedNodeId=-1;self.ending=NO;
+ return emit;
 }
 
 // Don't let the root press-recognizer swallow clicks that land on an editable
@@ -576,7 +706,7 @@ struct GeaSyncDepthScope {
 {
 	if (self.nodeId < 0) return;
 	auto &tree = gea::embedded::ui::Tree::instance();
-	if (self.nodeId >= tree.nodeCount()) return;
+	if (self.nodeId >= tree.nodeCount() || !geaViewBindingCurrent(self,self.nodeId)) return;
 	const CGFloat y = self.bounds.origin.y;
 	const CGFloat maxY = std::max<CGFloat>(0, NSHeight(self.documentView.frame) - NSHeight(self.bounds));
 	if (y < -0.5 || y > maxY + 0.5) return;
@@ -588,12 +718,14 @@ struct GeaSyncDepthScope {
 // change it writes its integer value into the node's `value` attribute and
 // dispatches an `input` PointerEvent, so the app's onInput handler reads the new
 // value off event.currentTarget.value (same convention as GeaInputField).
-@interface GeaSlider : NSSlider
+@interface GeaSlider : NSSlider { gea::embedded::ui::ControlCommit _geaCommit; }
 @property(nonatomic, assign) int nodeId;
 @property(nonatomic, assign) BOOL geaDragging;
 @end
 
 @implementation GeaSlider
+- (BOOL)becomeFirstResponder {if(!geaControlAdmitted(self,self.nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,self.nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
 - (instancetype)initWithFrame:(NSRect)frameRect
 {
 	if ((self = [super initWithFrame:frameRect])) {
@@ -606,22 +738,54 @@ struct GeaSyncDepthScope {
 {
 	// Guard the tracking loop so applySliderProps doesn't fight the user's drag
 	// by writing back a (possibly lagging) bound value mid-gesture.
-	_geaDragging = YES;
+	if(!geaControlAdmitted(self,_nodeId))return;
+	_geaCommit.begin(_nodeId);_geaDragging = YES;
 	[super mouseDown:event];
 	_geaDragging = NO;
+	auto commit=_geaCommit;commit.commit();
 }
 - (void)geaChanged:(id)sender
 {
 	(void)sender;
 	if (_nodeId < 0) return;
 	auto &tree = gea::embedded::ui::Tree::instance();
-	if (_nodeId >= tree.nodeCount()) return;
-	const int v = (int)(self.doubleValue + 0.5);
-	tree.setAttribute(_nodeId, "value", std::to_string(v).c_str());
+	if (!geaControlAdmitted(self,_nodeId)) return;
+	gea::embedded::ui::ControlCommit discreteCommit;if(!_geaDragging)discreteCommit.begin(_nodeId);
+	// Keep the range contract in doubles: signed fractional controls (gain,
+	// pan) must not pass through the former unsigned integer rounding path.
+	const double minimum = self.minValue, maximum = self.maxValue;
+	double v = self.doubleValue;
+	if (!std::isfinite(v) || !std::isfinite(minimum) ||
+	    !std::isfinite(maximum) || maximum < minimum) return;
+	v = std::clamp(v, minimum, maximum);
+	const char *stepAttribute = tree.getAttribute(_nodeId, "step");
+	if (!stepAttribute || std::strcmp(stepAttribute, "any") != 0) {
+		double step = 1.0;
+		if (stepAttribute && stepAttribute[0]) {
+			char *end = nullptr;
+			const double parsed = std::strtod(stepAttribute, &end);
+			if (end != stepAttribute && *end == '\0' && std::isfinite(parsed) && parsed > 0)
+				step = parsed;
+		}
+		const long double span = ((long double)maximum - minimum) / step;
+		// Attribute doubles can put an aligned maximum a few ulps below its
+		// integer index. Admit that endpoint, but never an out-of-range step.
+		const long double tolerance = 8 * std::numeric_limits<double>::epsilon() * std::max(1.0L, std::abs(span));
+		const long double last = std::floor(span + tolerance);
+		const long double index = std::clamp(std::floor(((long double)v - minimum) / step + 0.5L), 0.0L, last);
+		v = std::clamp((double)((long double)minimum + index * step), minimum, maximum);
+	}
+	// Shortest round-trippable decimal, without to_string's six-digit loss.
+	char value[64];
+	const auto encoded = std::to_chars(value, value + sizeof(value), v == 0 ? 0.0 : v);
+	if (encoded.ec != std::errc{}) return;
+	tree.setAttribute(_nodeId, "value", std::string(value, encoded.ptr).c_str());
+	if(_geaDragging)_geaCommit.edited(_nodeId);else discreteCommit.edited(_nodeId);
 	gea::framework::events::PointerEvent event;
 	event.type = gea::framework::events::PointerEventType::Input;
 	event.targetId = _nodeId;
 	tree.dispatchEvent(event);
+	if(!_geaDragging)discreteCommit.commit();
 }
 @end
 
@@ -633,6 +797,8 @@ struct GeaSyncDepthScope {
 @end
 
 @implementation GeaSwitch
+- (BOOL)becomeFirstResponder {if(!geaControlAdmitted(self,self.nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,self.nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
 - (instancetype)initWithFrame:(NSRect)frameRect
 {
 	if ((self = [super initWithFrame:frameRect])) {
@@ -645,13 +811,68 @@ struct GeaSyncDepthScope {
 	(void)sender;
 	if (_nodeId < 0) return;
 	auto &tree = gea::embedded::ui::Tree::instance();
-	if (_nodeId >= tree.nodeCount()) return;
+	if (!geaControlAdmitted(self,_nodeId)) return;
 	const bool on = self.state == NSControlStateValueOn;
-	tree.setAttribute(_nodeId, "checked", on ? "true" : "false");
-	gea::framework::events::PointerEvent event;
-	event.type = gea::framework::events::PointerEventType::Input;
-	event.targetId = _nodeId;
-	tree.dispatchEvent(event);
+	geaControlInput(self,_nodeId,nullptr,on?"true":"false");
+}
+@end
+
+#include "macos_key_event.h"
+static bool geaDispatchButtonKey(NSButton *button,NSEvent *native,bool up) {
+ PressBridge *bridge=objc_getAssociatedObject(button,"gea.press_bridge");
+ if(!bridge || !geaControlAdmitted(button,bridge.nodeId))return true;
+ auto event=geaNativeKey(native,false,up);event.targetId=bridge.nodeId;
+ gea::embedded::ui::dispatchRootKeyEvent(event);
+ return event.defaultPrevented;
+}
+@interface GeaButton : NSButton
+@property(nonatomic) NSUInteger geaKeyboardTicket;
+@property(nonatomic) unsigned short geaHeldKey;
+- (void)geaTrackMouseEvent:(NSEvent *)event;
+@end
+@implementation GeaButton
+- (BOOL)becomeFirstResponder {PressBridge*b=objc_getAssociatedObject(self,"gea.press_bridge");if(!b||!geaControlAdmitted(self,b.nodeId))return NO;const BOOL accepted=[super becomeFirstResponder];if(accepted)geaNativeFocusBegan(self,b.nodeId,true);return accepted;}
+- (BOOL)resignFirstResponder {const BOOL accepted=[super resignFirstResponder];if(accepted)geaNativeFocusEnded(self);return accepted;}
+- (void)geaTrackMouseEvent:(NSEvent *)event { [super mouseDown:event]; }
+- (void)mouseDown:(NSEvent *)event {
+ if(!self.enabled || !geaControlAdmitted(self,[(PressBridge*)objc_getAssociatedObject(self,"gea.press_bridge") nodeId]))return;
+ PressBridge *bridge=objc_getAssociatedObject(self,"gea.press_bridge");
+ const auto ticket=[bridge beginPointerPress:event];if(!ticket)return;
+ @try { [self geaTrackMouseEvent:event]; }
+ @finally { [bridge endPressTracking:ticket]; }
+}
+- (void)cancelOperation:(id)sender {
+ PressBridge *bridge=objc_getAssociatedObject(self,"gea.press_bridge");
+ [bridge cancelPress:sender];
+ if(self.geaKeyboardTicket)[bridge endPressTracking:self.geaKeyboardTicket];
+ self.geaKeyboardTicket=0;[self highlight:NO];
+}
+- (void)keyDown:(NSEvent *)event {
+ if(event.keyCode==53 && self.geaKeyboardTicket)[self cancelOperation:self];
+ if(geaDispatchButtonKey(self,event,false))return;
+ if(event.keyCode!=49 && event.keyCode!=36 && event.keyCode!=76){[super keyDown:event];return;}
+ if(!self.enabled || event.isARepeat || self.geaKeyboardTicket)return;
+ PressBridge *bridge=objc_getAssociatedObject(self,"gea.press_bridge");
+ self.geaKeyboardTicket=[bridge beginKeyboardPress:self];self.geaHeldKey=event.keyCode;
+ if(self.geaKeyboardTicket)[self highlight:YES];
+}
+- (void)keyUp:(NSEvent *)event {
+ PressBridge *admission=objc_getAssociatedObject(self,"gea.press_bridge");
+ if(!geaControlAdmitted(self,admission.nodeId)){[self cancelOperation:self];return;}
+ const bool handled=geaDispatchButtonKey(self,event,true);
+ if(!self.geaKeyboardTicket || event.keyCode!=self.geaHeldKey){
+  // A cancelled/repeated activation key has no native default to replay.
+  if(!handled && event.keyCode!=49 && event.keyCode!=36 && event.keyCode!=76)[super keyUp:event];
+  return;
+ }
+ PressBridge *bridge=objc_getAssociatedObject(self,"gea.press_bridge");
+ const auto ticket=self.geaKeyboardTicket;self.geaKeyboardTicket=0;
+ if(handled)[bridge cancelPress:self];else [bridge fire:self];
+ [bridge endPressTracking:ticket];[self highlight:NO];
+}
+- (void)setEnabled:(BOOL)enabled { if(!enabled)[self cancelOperation:self];[super setEnabled:enabled]; }
+- (void)viewWillMoveToWindow:(NSWindow *)window {
+ if(!window)[self cancelOperation:self];[super viewWillMoveToWindow:window];
 }
 @end
 
@@ -789,7 +1010,7 @@ NSView *makeStepper()
 
 NSView *makeButton()
 {
-	NSButton *btn = [[NSButton alloc] initWithFrame:NSZeroRect];
+	NSButton *btn = [[GeaButton alloc] initWithFrame:NSZeroRect];
 	btn.buttonType = NSButtonTypeMomentaryLight;
 	btn.bezelStyle = NSBezelStyleRounded;
 	[btn setWantsLayer:YES];
@@ -1502,7 +1723,7 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 void applyTextProps(NSTextField *tf, const gea::embedded::ui::Node &node, int nodeId)
 {
 	NSString *raw = [NSString stringWithUTF8String:(node.text.empty() ? "" : node.text.c_str())];
-	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight, node.style.font_stretch);
 	NSColor *color = gea::macos::nativeToNSColor(node.style.text_color);
 	GeaTextCell *cell = (GeaTextCell *)tf.cell;
  const char *vertical = gea::embedded::ui::Tree::instance().getAttribute(nodeId, "data-text-valign");
@@ -1546,7 +1767,7 @@ void applyInputProps(GeaInputField *tf, const gea::embedded::ui::Node &node, int
 {
 	using gea::embedded::ui::Tree;
 	tf.nodeId = nodeId;
-	tf.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	tf.enabled = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId);
 	tf.editable = tf.enabled && !geaBooleanAttribute(nodeId, "readOnly") && !geaBooleanAttribute(nodeId, "readonly");
 	((GeaInputCell *)tf.cell).contentInsets = NSEdgeInsetsMake(
 	    node.style.padding[0] + gea::embedded::ui::computedBorderWidth(node.style, 0),
@@ -1566,7 +1787,7 @@ void applyInputProps(GeaInputField *tf, const gea::embedded::ui::Node &node, int
 	auto &tree = Tree::instance();
 	const char *value = tree.getAttribute(nodeId, "value");
 	tf.textColor = gea::macos::nativeToNSColor(node.style.text_color);
-	tf.font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	tf.font = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight, node.style.font_stretch);
 	switch (node.style.text_align) {
 	case 1: tf.alignment = NSTextAlignmentCenter; break;
 	case 2: tf.alignment = NSTextAlignmentRight; break;
@@ -1598,7 +1819,7 @@ void applySliderProps(GeaSlider *sl, const gea::embedded::ui::Node &node, int no
 	using gea::embedded::ui::Tree;
 	auto &tree = Tree::instance();
 	sl.nodeId = nodeId;
-	sl.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	sl.enabled = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId);
 	const char *minA = tree.getAttribute(nodeId, "min");
 	const char *maxA = tree.getAttribute(nodeId, "max");
 	if (minA && minA[0]) sl.minValue = atof(minA);
@@ -1618,7 +1839,7 @@ void applySwitchProps(GeaSwitch *sw, const gea::embedded::ui::Node &node, int no
 	using gea::embedded::ui::Tree;
 	auto &tree = Tree::instance();
 	sw.nodeId = nodeId;
-	sw.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	sw.enabled = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId);
 	const char *checked = tree.getAttribute(nodeId, "checked");
 	const bool hasChecked = tree.hasAttribute(nodeId, "checked");
 	const bool explicitlyOff = checked && (std::strcmp(checked, "false") == 0 || std::strcmp(checked, "0") == 0);
@@ -1630,7 +1851,7 @@ void applySwitchProps(GeaSwitch *sw, const gea::embedded::ui::Node &node, int no
 void applyChoiceProps(GeaChoice *choice, int nodeId)
 {
 	choice.nodeId = nodeId;
-	choice.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	choice.enabled = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId);
 	const NSControlStateValue state = geaBooleanAttribute(nodeId, "checked") ? NSControlStateValueOn : NSControlStateValueOff;
 	if (choice.state != state) choice.state = state;
 }
@@ -1656,8 +1877,8 @@ void applyPopUpProps(GeaPopUp *popup, const gea::embedded::ui::Node &node, int n
 {
 	auto &tree = gea::embedded::ui::Tree::instance();
 	popup.nodeId = nodeId;
-	popup.enabled = !geaBooleanAttribute(nodeId, "disabled");
-	popup.font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	popup.enabled = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId);
+	popup.font = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight, node.style.font_stretch);
 	NSMutableArray<NSString *> *titles = [NSMutableArray array], *values = [NSMutableArray array];
 	std::vector<bool> disabled;
 	NSInteger selected = -1;
@@ -1672,7 +1893,7 @@ void applyPopUpProps(GeaPopUp *popup, const gea::embedded::ui::Node &node, int n
 		if ((desired && [desired isEqualToString:itemValue]) || (!desired && geaBooleanAttribute(child, "selected"))) selected = titles.count;
 		[titles addObject:title];
 		[values addObject:itemValue ?: @""];
-		disabled.push_back(geaBooleanAttribute(child, "disabled"));
+		disabled.push_back(gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), child));
 	}
 	BOOL changed = popup.numberOfItems != (NSInteger)titles.count;
 	for (NSUInteger i = 0; !changed && i < titles.count; ++i) {
@@ -1695,7 +1916,7 @@ void applyStepperProps(GeaStepper *stepper, int nodeId)
 {
 	auto &tree = gea::embedded::ui::Tree::instance();
 	stepper.nodeId = nodeId;
-	stepper.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	stepper.enabled = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId);
 	const char *min = tree.getAttribute(nodeId, "min"), *max = tree.getAttribute(nodeId, "max");
 	const char *step = tree.getAttribute(nodeId, "step"), *value = tree.getAttribute(nodeId, "value");
 	stepper.minValue = min && min[0] ? atof(min) : 0;
@@ -1790,9 +2011,10 @@ void applyTextAreaProps(NSScrollView *sv, const gea::embedded::ui::Node &node, i
 	    node.style.padding[2] + gea::embedded::ui::computedBorderWidth(node.style, 2),
 	    node.style.padding[1] + gea::embedded::ui::computedBorderWidth(node.style, 1));
 	tv.nodeId = nodeId;
-	tv.editable = !geaBooleanAttribute(nodeId, "disabled") && !geaBooleanAttribute(nodeId, "readOnly") && !geaBooleanAttribute(nodeId, "readonly");
+	objc_setAssociatedObject(tv,"gea.node_binding",objc_getAssociatedObject(sv,"gea.node_binding"),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	tv.editable = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId) && !geaBooleanAttribute(nodeId, "readOnly") && !geaBooleanAttribute(nodeId, "readonly");
 
-	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size > 0 ? node.style.font_size : 14);
+	NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size > 0 ? node.style.font_size : 14, node.style.font_weight, node.style.font_stretch);
 	NSColor *color = gea::macos::nativeToNSColor(node.style.text_color);
 	tv.font = font ?: [NSFont systemFontOfSize:14];
 	tv.textColor = color ?: [NSColor labelColor];
@@ -1827,7 +2049,7 @@ void applyButtonProps(NSButton *btn, const gea::embedded::ui::Node &node, int no
 {
 	using namespace gea::embedded::ui;
 	Tree &tree = Tree::instance();
-	btn.enabled = !geaBooleanAttribute(nodeId, "disabled");
+	btn.enabled = !gea::embedded::ui::selector::disabled(gea::embedded::ui::Tree::instance(), nodeId);
 
 	// Title from the first Text child, if any. JSX <Button>label</Button>
 	// produces a Button with a text child.
@@ -1872,7 +2094,7 @@ void applyButtonProps(NSButton *btn, const gea::embedded::ui::Node &node, int no
 	const bool cssStyled = node.style.has_bg;
 	if (btn.bordered != static_cast<BOOL>(!cssStyled)) btn.bordered = !cssStyled;
 	if (cssStyled) {
-		NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+		NSFont *font = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight, node.style.font_stretch);
 		NSColor *color = node.style.text_color != 0 ? gea::macos::nativeToNSColor(node.style.text_color)
 		                                            : [NSColor labelColor];
 		NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
@@ -2020,6 +2242,7 @@ void applyTypeSpecificProps(NSView *view, const gea::embedded::ui::Node &node, i
 		NSScrollView *sv = (NSScrollView *)view;
 		if ([sv.contentView isKindOfClass:[GeaFlippedClipView class]]) {
 			((GeaFlippedClipView *)sv.contentView).nodeId = nodeId;
+			objc_setAssociatedObject(sv.contentView,"gea.node_binding",objc_getAssociatedObject(view,"gea.node_binding"),OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 		}
 		applyScrollContentSize(sv, node);
 	}
@@ -2095,7 +2318,8 @@ NSView *ensureViewForNode(int nodeId, const gea::embedded::ui::Node &node)
 	const char *inputType = gea::embedded::ui::Tree::instance().getAttribute(nodeId, "type");
 	const char *control = gea::embedded::ui::Tree::instance().getAttribute(nodeId, "data-control");
 	const bool checkboxButton = inputType && std::strcmp(inputType, "checkbox") == 0 && control && std::strcmp(control, "checkbox") == 0;
-	if (view && !viewMatchesNode(view, node, tagName, inputType, checkboxButton)) {
+	if (view && (!geaViewBindingCurrent(view,nodeId) || !viewMatchesNode(view, node, tagName, inputType, checkboxButton))) {
+		geaRetireNativeView(view);
 		[view removeFromSuperview];
 		[nodeIdToView() removeObjectForKey:key];
 		view = nil;
@@ -2107,6 +2331,7 @@ NSView *ensureViewForNode(int nodeId, const gea::embedded::ui::Node &node)
 	// dispatch with the deepest matching node's id (event delegation —
 	// the framework binds listeners on document.body and checks event.target).
 	objc_setAssociatedObject(view, "gea.node_id", key, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	objc_setAssociatedObject(view,"gea.node_binding",[[GeaNativeBinding alloc] initWithNode:nodeId],OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	nodeIdToView()[key] = view;
 	return view;
 }
@@ -2180,7 +2405,7 @@ void appendInlineRuns(NSMutableAttributedString *out, int nodeId,
 		if (node.style.text_color != 0) {
 			col = gea::macos::nativeToNSColor(node.style.text_color);
 		}
-		NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+		NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight, node.style.font_stretch);
 		if (resolved) font = resolved;
 		NSMutableDictionary *attrs = textAttributes(font, col, node.style.text_decoration);
 		[out appendAttributedString:[[NSAttributedString alloc] initWithString:str attributes:attrs]];
@@ -2193,7 +2418,7 @@ void appendInlineRuns(NSMutableAttributedString *out, int nodeId,
 	if (node.style.text_color != 0) {
 		col = gea::macos::nativeToNSColor(node.style.text_color);
 	}
-	NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	NSFont *resolved = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight, node.style.font_stretch);
 	if (resolved) font = resolved;
 	for (int c = node.first_child; c >= 0; c = tree.node(c).next_sibling) {
 		appendInlineRuns(out, c, font, col);
@@ -2231,7 +2456,7 @@ NSTextField *renderInlineComposition(int nodeId, NSView *parentNSView,
 		objc_setAssociatedObject(parentNSView, "gea.inline_field", field, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
 
-	NSFont *parentFont = gea::macos::fontForId(node.style.font_id, node.style.font_size);
+	NSFont *parentFont = gea::macos::fontForId(node.style.font_id, node.style.font_size, node.style.font_weight, node.style.font_stretch);
 	NSColor *parentColor = gea::macos::nativeToNSColor(node.style.text_color);
 	NSMutableAttributedString *composite = [[NSMutableAttributedString alloc] init];
 	for (int c = node.first_child; c >= 0; c = tree.node(c).next_sibling) {
@@ -2272,6 +2497,7 @@ void syncRecursive(int nodeId, NSView *parent, int parentAbsX, int parentAbsY, i
 	Tree &tree = Tree::instance();
 	if (nodeId < 0 || nodeId >= tree.nodeCount()) return;
 	const Node &node = tree.node(nodeId);
+	if (isStructuralNodeType(node.type)) return;
 
 	NSNumber *key = @(nodeId);
 	[unseen removeObject:key];
@@ -2377,6 +2603,8 @@ void MacosRenderer::sync(NSView *parentForRoot, int rootNodeId)
 	Tree &tree = Tree::instance();
 	if (rootNodeId < 0 || rootNodeId >= tree.nodeCount()) return;
 
+	GeaNativeBinding*rootBinding=objc_getAssociatedObject(parentForRoot,"gea.focus_root_binding");
+	if(!rootBinding||!gea::framework::identity::current(rootNodeId,rootBinding->owner)||rootBinding->nodeId!=rootNodeId){geaClearFocusedView(parentForRoot);objc_setAssociatedObject(parentForRoot,"gea.focus_root_binding",[[GeaNativeBinding alloc]initWithNode:rootNodeId],OBJC_ASSOCIATION_RETAIN_NONATOMIC);}
 	ensureRootClickBridge(parentForRoot, 0, 0);
 
 	// Mark every existing entry stale; syncRecursive removes the keys it
@@ -2394,6 +2622,7 @@ void MacosRenderer::sync(NSView *parentForRoot, int rootNodeId)
 
 	for (NSNumber *gone in unseen) {
 		NSView *v = nodeIdToView()[gone];
+		geaRetireNativeView(v);
 		[v removeFromSuperview];
 		[nodeIdToView() removeObjectForKey:gone];
 	}
@@ -2427,6 +2656,7 @@ void MacosRenderer::syncPanes(NSArray *paneViews, const int *rootNodeIds)
 
 	for (NSNumber *gone in unseen) {
 		NSView *v = nodeIdToView()[gone];
+		geaRetireNativeView(v);
 		[v removeFromSuperview];
 		[nodeIdToView() removeObjectForKey:gone];
 	}
@@ -2435,9 +2665,82 @@ void MacosRenderer::syncPanes(NSArray *paneViews, const int *rootNodeIds)
 void MacosRenderer::teardown()
 {
 	for (NSView *v in [nodeIdToView() allValues]) {
+		geaRetireNativeView(v);
 		[v removeFromSuperview];
 	}
 	[nodeIdToView() removeAllObjects];
 }
 
+void nativeRootFocusChanged(NSView*view,bool focused,int node){
+ if(!focused){geaNativeFocusEnded(view);return;}
+ GeaNativeBinding*root=objc_getAssociatedObject(view,"gea.focus_root_binding");
+ if(!root||!root->active||!gea::framework::identity::current(root->nodeId,root->owner))return;
+ auto&t=gea::embedded::ui::Tree::instance();
+ auto owner=geaPendingFocus.valid()?geaPendingFocus:gea::embedded::ui::NodeHandle(node);
+ if(!owner.valid()||!owner.isConnected()||!t.containsNode(root->nodeId,owner.id())||gea::embedded::ui::selector::disabled(t,owner.id()))return;
+ geaFocused.view=view;geaFocused.node=owner;t.setActiveInput(owner.id());
+}
+static gea::embedded::ui::NativeFocusResult requestFocusNode(gea::embedded::ui::NodeHandle node,bool focus){
+ using namespace gea::embedded::ui;
+ if(![NSThread isMainThread]||!node.valid()||!node.isConnected())return NativeFocusResult::refused;
+ if(!focus){if(!geaFocused.node.valid()||geaFocused.node.identity()!=node.identity())return NativeFocusResult::accepted;NSView*view=geaFocused.view;if(!geaOwnsResponder(view)){geaNativeFocusEnded(view);return NativeFocusResult::accepted;}const BOOL accepted=[view.window makeFirstResponder:nil];if(accepted)geaNativeFocusEnded(view);return accepted?NativeFocusResult::accepted:NativeFocusResult::refused;}
+ NSView*view=nodeIdToView()[@(node.id())];if(!view||!geaViewBindingCurrent(view,node.id())||!geaControlAdmitted(view,node.id()))return NativeFocusResult::refused;
+ NSView*responder=view;
+ if(isScrollView(view)&&objc_getAssociatedObject(view,"gea.text_view"))responder=objc_getAssociatedObject(view,"gea.text_view");
+ if(![responder acceptsFirstResponder]){responder=view.superview;while(responder&&!objc_getAssociatedObject(responder,"gea.focus_root_binding"))responder=responder.superview;}
+ if(!responder||!responder.window||![responder acceptsFirstResponder])return NativeFocusResult::refused;
+ geaPendingFocus=node;const BOOL accepted=[responder.window makeFirstResponder:responder];geaPendingFocus={};
+ if(!accepted||!node.valid()||!geaOwnsResponder(responder)||!geaViewBindingCurrent(view,node.id()))return NativeFocusResult::refused;
+ GeaNativeBinding*root=objc_getAssociatedObject(responder,"gea.focus_root_binding");
+ if(root)nativeRootFocusChanged(responder,true,node.id());else geaNativeFocusBegan(responder,node.id());
+ return geaFocused.node.valid()&&geaFocused.node.identity()==node.identity()?NativeFocusResult::accepted:NativeFocusResult::refused;
+}
 }  // namespace gea::macos
+
+namespace gea::embedded::ui {
+void retirePlatformInputForSubtrees(const InputRetirementRoots &removed,const InputRetirementRoots &retained) {
+ if(![NSThread isMainThread])throw std::runtime_error("native input retirement requires UI owner thread");
+ struct ViewLease {__strong NSView *view;__strong GeaNativeBinding *binding;__strong PressBridge *press;};
+ struct RootLease {__strong GeaRootClickBridge *bridge;__strong GeaNativeBinding *binding;NodeHandle owner;int x,y;bool emit=false;};
+ std::vector<ViewLease> views;std::vector<RootLease> roots;
+ // Snapshot actual associations and all root recognizers before user code.
+ NSArray<NSView *> *mapped=[gea::macos::nodeIdToView() allValues];
+ for(NSView *view in mapped){
+  GeaNativeBinding *binding=objc_getAssociatedObject(view,"gea.node_binding");
+  if(binding && binding->active && gea::framework::identity::current(binding->nodeId,binding->owner) && inputOwnerLeaving(NodeHandle(binding->nodeId),removed,retained))
+   views.push_back({view,binding,objc_getAssociatedObject(view,"gea.press_bridge")});
+  for(NSView *ancestor=view;ancestor;ancestor=ancestor.superview){
+   GeaRootClickBridge *bridge=objc_getAssociatedObject(ancestor,"gea.root_click_bridge");
+   if(!bridge || !bridge.pressedBinding)continue;
+   GeaNativeBinding *lease=bridge.pressedBinding;
+   if(!lease->active || !gea::framework::identity::current(lease->nodeId,lease->owner) || !inputOwnerLeaving(NodeHandle(lease->nodeId),removed,retained))continue;
+   bool found=false;for(const auto &entry:roots)if(entry.bridge==bridge){found=true;break;}
+   if(!found)roots.push_back({bridge,lease,NodeHandle(lease->nodeId),bridge.lastX,bridge.lastY,false});
+  }
+ }
+ // Input-only retirement: retained descendant responder leases are untouched.
+ std::vector<__strong GeaRetiredPress *> presses;presses.reserve(views.size());
+ for(const auto &entry:views)entry.binding->active=NO;
+ for(const auto &entry:views)if(entry.press)presses.push_back([entry.press closeInputBinding]);
+ for(auto &entry:roots)entry.emit=[entry.bridge closeInputBinding:entry.binding];
+ std::exception_ptr failure;
+ for(GeaRetiredPress *press:presses)try{[press emitCancellation];}catch(...){if(!failure)failure=std::current_exception();}
+ for(const auto &entry:roots)try{if(entry.emit)geaEmitRootCancellation(entry.owner,entry.x,entry.y);}catch(...){if(!failure)failure=std::current_exception();}
+ if(failure)std::rethrow_exception(failure);
+ // A cancellation handler can render/rebind; never commit across a revived association.
+ for(NSView *view in [gea::macos::nodeIdToView() allValues]){
+  GeaNativeBinding *binding=objc_getAssociatedObject(view,"gea.node_binding");
+  if(binding && binding->active && gea::framework::identity::current(binding->nodeId,binding->owner) && inputOwnerLeaving(NodeHandle(binding->nodeId),removed,retained))
+   throw std::runtime_error("native binding revived during input retirement");
+  for(NSView *ancestor=view;ancestor;ancestor=ancestor.superview){
+   GeaRootClickBridge *bridge=objc_getAssociatedObject(ancestor,"gea.root_click_bridge");
+   GeaNativeBinding *lease=bridge.pressedBinding;
+   if(lease && lease->active && gea::framework::identity::current(lease->nodeId,lease->owner) && inputOwnerLeaving(NodeHandle(lease->nodeId),removed,retained))
+    throw std::runtime_error("native root gesture revived during input retirement");
+  }
+ }
+}
+
+NativeFocusResult requestNativeFocus(NodeHandle node,bool focus){return gea::macos::requestFocusNode(node,focus);}
+NativeFocusQuery queryNativeFocus(){auto node=geaFocused.node;return {true, node.valid()&&node.isConnected()&&geaOwnsResponder(geaFocused.view)?node:NodeHandle()};}
+}

@@ -84,6 +84,7 @@ function walkCss(root, visit) {
 // collisions, but keep an owned manifest so removed @font-face declarations do
 // not leave stale resources in the app bundle.
 const desiredFonts = new Map()
+const desiredFontLicenses = new Map()
 for (const root of [...appDirs, ...sharedCssDirs]) {
   walkCss(root, (cssPath) => {
     const css = fs.readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
@@ -98,7 +99,18 @@ for (const root of [...appDirs, ...sharedCssDirs]) {
       const resolved = path.resolve(path.dirname(cssPath), clean)
       if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) continue
       const basename = path.basename(resolved)
-      if (!desiredFonts.has(basename)) desiredFonts.set(basename, resolved)
+      if (!desiredFonts.has(basename)) {
+        desiredFonts.set(basename, resolved)
+        // Preserve licenses alongside packaged font bytes, using a font-specific
+        // name so independent families with OFL.txt cannot overwrite each other.
+        for (const name of ['OFL.txt', 'LICENSE.txt', 'LICENSE']) {
+          const license = path.join(path.dirname(resolved), name)
+          if (fs.existsSync(license) && fs.statSync(license).isFile()) {
+            desiredFontLicenses.set(`${basename}.license.txt`, license)
+            break
+          }
+        }
+      }
     }
   })
 }
@@ -134,6 +146,16 @@ if (fs.existsSync(fontsDir) && fs.readdirSync(fontsDir).length === 0) {
   fs.rmdirSync(fontsDir)
 }
 
+const fontLicensesDir = path.join(resourcesDir, 'FontLicenses')
+if (fs.existsSync(fontLicensesDir)) {
+  for (const entry of fs.readdirSync(fontLicensesDir, {withFileTypes: true})) {
+    if ((entry.isFile() || entry.isSymbolicLink()) && !desiredFontLicenses.has(entry.name))
+      removeFile(path.join(fontLicensesDir, entry.name))
+  }
+}
+for (const [name, source] of desiredFontLicenses) syncFile(source, path.join(fontLicensesDir, name))
+if (fs.existsSync(fontLicensesDir) && fs.readdirSync(fontLicensesDir).length === 0) fs.rmdirSync(fontLicensesDir)
+
 const windowConfig = path.join(resourcesDir, 'window.json')
 for (const entry of fs.readdirSync(resourcesDir, { withFileTypes: true })) {
   if (entry.isFile() && /^window\.json\.tmp\.\d+$/.test(entry.name)) removeFile(path.join(resourcesDir, entry.name))
@@ -142,7 +164,7 @@ const configSource = configDir ? path.join(configDir, 'macos.json') : ''
 if (configSource && fs.existsSync(configSource)) syncFile(configSource, windowConfig)
 else removeFile(windowConfig)
 
-const manifest = `${JSON.stringify({ fonts: [...desiredFonts.keys()].sort() }, null, 2)}\n`
+const manifest = `${JSON.stringify({ fonts: [...desiredFonts.keys()].sort(), fontLicenses: [...desiredFontLicenses.keys()].sort() }, null, 2)}\n`
 fs.mkdirSync(path.dirname(manifestPath), { recursive: true })
 if (!fs.existsSync(manifestPath) || fs.readFileSync(manifestPath, 'utf8') !== manifest) {
   const temporary = `${manifestPath}.tmp.${process.pid}`

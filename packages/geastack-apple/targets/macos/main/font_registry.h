@@ -16,6 +16,8 @@ namespace gea::macos {
 // to assign stable ids the first time each family is seen. Unknown ids fall
 // back to the system font.
 NSFont *fontForId(int fontId, int sizePx);
+// Stretch uses percentage tenths (1000 = 100%). The tuple is part of font identity.
+NSFont *fontForId(int fontId, int sizePx, int weight, int stretch);
 
 // Walks `directoryPath` for .ttf / .otf files and registers each with
 // CTFontManager in the process scope. Returns the count of newly registered

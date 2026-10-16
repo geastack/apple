@@ -17,6 +17,7 @@ assert.ok(first >= 0 && last > first, 'missing GeaContentView in macos_main.mm')
 const source = `
 #import <Cocoa/Cocoa.h>
 #import <GameController/GameController.h>
+#include "macos_renderer.h"
 #include "press_bridge.h"
 #include "ui/document.h"
 #include "ui/node.h"

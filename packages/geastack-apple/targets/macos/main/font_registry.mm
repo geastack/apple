@@ -128,65 +128,63 @@ const std::uint8_t *runtimeTtfBytesForFamilyId(int familyId, unsigned long *leng
 	return it->second.data();
 }
 
-static NSFont *self_resolveFont(int fontId, CGFloat size);
-
-NSFont *fontForId(int fontId, int sizePx)
-{
-	CGFloat size = sizePx > 0 ? static_cast<CGFloat>(sizePx) : [NSFont systemFontSize];
-
-	// Cache resolved fonts by (fontId, size). `+[NSFont fontWithName:size:]` and
-	// the CTFontDescriptor fallback below both do a CoreText font-descriptor
-	// match, which is expensive — and this is called for EVERY text node on
-	// EVERY frame (renderer sync + layout measurement). Without this cache,
-	// CoreText font matching dominated the profile and pegged a CPU core. The
-	// set of (family, size) pairs an app uses is tiny, so the cache stays small.
-	static NSMutableDictionary<NSNumber *, NSFont *> *cache;
-	static dispatch_once_t once;
-	dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
-	NSNumber *key = @(static_cast<long long>(fontId) * 100000LL + llround(size));
-	@synchronized(cache) {
-		NSFont *hit = cache[key];
-		if (hit) return hit;
-	}
-	NSFont *resolved = self_resolveFont(fontId, size);
-	if (resolved) {
-		@synchronized(cache) { cache[key] = resolved; }
-	}
-	return resolved;
-}
-
-static NSFont *self_resolveFont(int fontId, CGFloat size)
+static NSFont *self_resolveFont(int fontId, int sizePx, int weight, int stretch)
 {
 	NSString *family = familyForId(fontId);
+	const CGFloat size = std::clamp(sizePx > 0 ? sizePx : 13, 1, 4096);
 	if (!family || family.length == 0) return [NSFont systemFontOfSize:size];
-	// CSS system-font keywords map to the actual system UI font — San Francisco
-	// on macOS. There is no PostScript face literally named "-apple-system", so
-	// `+[NSFont fontWithName:@"-apple-system"]` returns nil and we'd otherwise
-	// fall through to a wrong family. systemFontOfSize: IS San Francisco.
 	NSString *lower = family.lowercaseString;
 	if ([lower isEqualToString:@"-apple-system"] || [lower isEqualToString:@"system-ui"] ||
 	    [lower isEqualToString:@"blinkmacsystemfont"] || [lower hasPrefix:@".applesystemuifont"] ||
 	    [lower hasPrefix:@".sf"] || [lower isEqualToString:@"san francisco"] ||
 	    [lower isEqualToString:@"sf pro"] || [lower isEqualToString:@"sf pro text"]) {
-		return [NSFont systemFontOfSize:size];
+		const CGFloat nativeWeight = weight <= 400 ? (weight - 400) / 1000.0 : (weight - 400) / 800.0;
+		return [NSFont systemFontOfSize:size weight:nativeWeight];
 	}
-	NSFont *font = [NSFont fontWithName:family size:size];
-	if (font) return font;
-	// CTFont's family lookup is more forgiving than NSFont's PostScript-name
-	// lookup — fall back to building a CTFont with the family attribute.
-	NSDictionary *attrs = @{
-		(__bridge NSString *)kCTFontFamilyNameAttribute: family,
-		(__bridge NSString *)kCTFontSizeAttribute: @(size),
+	NSDictionary *baseAttributes = @{ (__bridge NSString *)kCTFontFamilyNameAttribute: family };
+	CTFontDescriptorRef descriptor = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)baseAttributes);
+	CTFontRef base = CTFontCreateWithFontDescriptor(descriptor, size, nullptr);
+	CFRelease(descriptor);
+	if (!base) return [NSFont systemFontOfSize:size];
+	NSMutableDictionary *variation = [NSMutableDictionary dictionary];
+	CFArrayRef axes = CTFontCopyVariationAxes(base);
+	if (axes) {
+		for (NSDictionary *axis in (__bridge NSArray *)axes) {
+			NSNumber *identifier = axis[(__bridge NSString *)kCTFontVariationAxisIdentifierKey];
+			const uint32_t tag = identifier.unsignedIntValue;
+			if (tag != 0x77676874 && tag != 0x77647468) continue; // wght / wdth
+			const double requested = tag == 0x77676874 ? weight : stretch / 10.0;
+			const double minimum = [axis[(__bridge NSString *)kCTFontVariationAxisMinimumValueKey] doubleValue];
+			const double maximum = [axis[(__bridge NSString *)kCTFontVariationAxisMaximumValueKey] doubleValue];
+			variation[identifier] = @(std::clamp(requested, minimum, maximum));
+		}
+		CFRelease(axes);
+	}
+	NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
+	if (variation.count) attributes[(__bridge NSString *)kCTFontVariationAttribute] = variation;
+	else attributes[(__bridge NSString *)kCTFontTraitsAttribute] = @{
+		(__bridge NSString *)kCTFontWeightTrait: @((weight - 400) / 800.0)
 	};
-	CTFontDescriptorRef desc = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attrs);
-	CTFontRef ct = CTFontCreateWithFontDescriptor(desc, size, NULL);
-	CFRelease(desc);
-	if (ct) {
-		NSFont *resolved = (__bridge_transfer NSFont *)ct;
-		return resolved;
-	}
-	return [NSFont systemFontOfSize:size];
+	CTFontDescriptorRef adjustment = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attributes);
+	CTFontRef selected = CTFontCreateCopyWithAttributes(base, size, nullptr, adjustment);
+	CFRelease(adjustment); CFRelease(base);
+	return selected ? (__bridge_transfer NSFont *)selected : [NSFont systemFontOfSize:size];
 }
+
+NSFont *fontForId(int fontId, int sizePx, int weight, int stretch)
+{
+	weight = std::clamp(weight, 1, 1000);
+	stretch = std::clamp(stretch, 1, 32767);
+	sizePx = std::clamp(sizePx > 0 ? sizePx : 13, 1, 4096);
+	static NSMutableDictionary<NSString *, NSFont *> *cache = [NSMutableDictionary dictionary];
+	NSString *key = [NSString stringWithFormat:@"%d:%d:%d:%d", fontId, sizePx, weight, stretch];
+	@synchronized(cache) { NSFont *hit = cache[key]; if (hit) return hit; }
+	NSFont *selected = self_resolveFont(fontId, sizePx, weight, stretch);
+	if (selected) { @synchronized(cache) { if (cache.count >= 1024) [cache removeAllObjects]; cache[key] = selected; } }
+	return selected;
+}
+
+NSFont *fontForId(int fontId, int sizePx) { return fontForId(fontId, sizePx, 400, 1000); }
 
 int registerCustomTtfDirectory(NSString *directoryPath)
 {
@@ -274,10 +272,10 @@ NSLineBreakMode lineBreakModeForText(NSString *text, NSFont *font, CGFloat maxWi
 // Host text-measurement hook for the AppKit renderer. The Thermalright target
 // has no AppKit text renderer; it wants the framework's generated-font metrics.
 #if !GEA_MACOS_THERMALRIGHT_DISPLAY_TARGET
-extern "C" bool gea_host_measure_text(const char *text,
+static bool measureNativeText(const char *text,
                                       int maxWidth,
                                       int fontId,
-                                      int fontSize,
+                                      int fontSize, int fontWeight, int fontStretch, int lineHeight,
                                       int *outWidth,
                                       int *outHeight)
 {
@@ -304,6 +302,9 @@ extern "C" bool gea_host_measure_text(const char *text,
 	key.append(std::to_string(fontId));
 	key.push_back('\x1f');
 	key.append(std::to_string(fontSize));
+	key.push_back('\x1f'); key.append(std::to_string(fontWeight));
+	key.push_back('\x1f'); key.append(std::to_string(fontStretch));
+	key.push_back('\x1f'); key.append(std::to_string(lineHeight));
 	{
 		std::scoped_lock guard(measureLock);
 		auto it = measureCache.find(key);
@@ -314,12 +315,13 @@ extern "C" bool gea_host_measure_text(const char *text,
 		}
 	}
 
-	NSFont *font = gea::macos::fontForId(fontId, fontSize);
+	NSFont *font = gea::macos::fontForId(fontId, fontSize, fontWeight, fontStretch);
 	if (!font) return false;
 	NSString *str = [NSString stringWithUTF8String:text] ?: @"";
 	const CGFloat boundedMax = maxWidth > 0 ? maxWidth : CGFLOAT_MAX;
 	NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
 	paragraph.lineBreakMode = gea::macos::lineBreakModeForText(str, font, boundedMax);
+	if (lineHeight > 0) { paragraph.minimumLineHeight = lineHeight; paragraph.maximumLineHeight = lineHeight; }
 	NSDictionary *attrs = @{
 		NSFontAttributeName: font,
 		NSParagraphStyleAttributeName: paragraph,
@@ -347,4 +349,23 @@ extern "C" bool gea_host_measure_text(const char *text,
 	}
 	return true;
 }
+// Readiness must reject CoreText's successful system fallback for a missing face.
+extern "C" bool gea_host_packaged_font_available(int familyId)
+{
+ unsigned long length = 0;
+ if (!gea::macos::runtimeTtfBytesForFamilyId(familyId, &length) || !length) return false;
+ NSString *requested = gea::macos::familyForId(familyId);
+ NSFont *selected = gea::macos::fontForId(familyId, 14, 400, 1000);
+ if (!requested || !selected || ![selected.familyName isEqualToString:requested]) return false;
+ const UniChar characters[] = {'A', 0x00b5};
+ CGGlyph glyphs[2] = {};
+ return CTFontGetGlyphsForCharacters((__bridge CTFontRef)selected, characters, glyphs, 2)
+   && glyphs[0] != 0 && glyphs[1] != 0;
+}
+extern "C" bool gea_host_measure_text(const char *text, int maxWidth, int fontId, int fontSize, int *width, int *height)
+{ return measureNativeText(text, maxWidth, fontId, fontSize, 400, 1000, 0, width, height); }
+extern "C" bool gea_host_measure_text_with_style(const char *text, int maxWidth, int fontId, int fontSize, int weight, int lineHeight, int *width, int *height)
+{ return measureNativeText(text, maxWidth, fontId, fontSize, weight, 1000, lineHeight, width, height); }
+extern "C" bool gea_host_measure_text_with_variations(const char *text, int maxWidth, int fontId, int fontSize, int weight, int stretch, int lineHeight, int *width, int *height)
+{ return measureNativeText(text, maxWidth, fontId, fontSize, weight, stretch, lineHeight, width, height); }
 #endif

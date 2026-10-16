@@ -1,0 +1,49 @@
+#import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
+#include "macos_background_test.h"
+#include <algorithm>
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <unistd.h>
+@interface ReferenceNeverFrontWindow:NSWindow
+@end
+@implementation ReferenceNeverFrontWindow
+- (BOOL)canBecomeKeyWindow{return NO;}
+- (BOOL)canBecomeMainWindow{return NO;}
+- (void)makeKeyAndOrderFront:(id)sender{gea::macos::background_test::refuse("front forbidden");}
+- (void)makeKeyWindow{gea::macos::background_test::refuse("key forbidden");}
+- (void)makeMainWindow{gea::macos::background_test::refuse("main forbidden");}
+- (void)orderFront:(id)sender{gea::macos::background_test::refuse("front forbidden");}
+- (void)orderFrontRegardless{gea::macos::background_test::refuse("front forbidden");}
+- (void)orderWindow:(NSWindowOrderingMode)p relativeTo:(NSInteger)n{gea::macos::background_test::refuse("order forbidden");}
+@end
+@interface ReferenceAction:NSObject
+@property(nonatomic) int count;
+- (void)fire:(id)sender;
+@end
+@implementation ReferenceAction
+- (void)fire:(id)sender{++_count;}
+@end
+static void settle(NSView*v){[v layoutSubtreeIfNeeded];[v setNeedsDisplay:YES];for(NSView*c in v.subviews)settle(c);[v displayIfNeeded];}
+static void save(NSData*data,NSString*path){assert(data.length);assert(![[NSFileManager defaultManager]fileExistsAtPath:path]);assert([data writeToFile:path options:NSDataWritingWithoutOverwriting error:nil]);}
+int main(){@autoreleasepool{
+ alarm(12);if(!gea::macos::background_test::enabled())gea::macos::background_test::refuse("explicit mode required");const char*audio=getenv("GEA_AUDIO_DISABLED");if(!audio||strcmp(audio,"1"))gea::macos::background_test::refuse("audio fence required");
+ const char*out=getenv("GEA_NATIVE_SNAPSHOT");if(!out)gea::macos::background_test::refuse("fresh snapshot path required");NSString*path=[NSString stringWithUTF8String:out];const char*dir=getenv("GEA_NATIVE_SNAPSHOT_DIR");if(!dir||dir[0]!='/')gea::macos::background_test::refuse("snapshot directory required");if(![path hasPrefix:[[NSString stringWithUTF8String:dir]stringByAppendingString:@"/hidden-appkit-reference-"]]||[path containsString:@"/../"])gea::macos::background_test::refuse("snapshot path refused");
+ pid_t before=NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;NSPoint pointer=NSEvent.mouseLocation;
+ NSApplication*app=NSApplication.sharedApplication;gea::macos::background_test::configure(app);
+ ReferenceNeverFrontWindow*w=[[ReferenceNeverFrontWindow alloc]initWithContentRect:NSMakeRect(0,0,640,400) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];w.releasedWhenClosed=NO;
+ NSView*root=[[NSView alloc]initWithFrame:NSMakeRect(0,0,640,400)];root.wantsLayer=YES;w.contentView=root;
+ NSButton*b=[[NSButton alloc]initWithFrame:NSMakeRect(0,360,160,40)];b.buttonType=NSButtonTypeMomentaryLight;b.bezelStyle=NSBezelStyleRounded;b.wantsLayer=YES;b.title=@"Native method";ReferenceAction*target=[ReferenceAction new];b.target=target;b.action=@selector(fire:);[root addSubview:b];
+ NSTextField*field=[[NSTextField alloc]initWithFrame:NSMakeRect(0,320,200,40)];field.bezeled=NO;field.bordered=NO;field.drawsBackground=NO;field.wantsLayer=YES;field.stringValue=@"Native typed";field.textColor=[NSColor colorWithSRGBRed:11./255 green:12./255 blue:14./255 alpha:1];field.layer.backgroundColor=[NSColor colorWithSRGBRed:243./255 green:240./255 blue:233./255 alpha:1].CGColor;[root addSubview:field];
+ NSPopUpButton*popup=[[NSPopUpButton alloc]initWithFrame:NSMakeRect(0,240,200,40) pullsDown:NO];[popup addItemsWithTitles:@[@"a",@"b"]];[popup selectItemAtIndex:1];[root addSubview:popup];
+ gea::macos::background_test::present(w);gea::macos::background_test::checkApplication(app);
+ NSPoint p=[b convertPoint:NSMakePoint(80,20) toView:nil];NSEvent*down=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:p modifierFlags:0 timestamp:1 windowNumber:w.windowNumber context:nil eventNumber:1 clickCount:1 pressure:1];NSEvent*up=[NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:p modifierFlags:0 timestamp:1.01 windowNumber:w.windowNumber context:nil eventNumber:2 clickCount:1 pressure:0];assert(down.window==w&&up.window==w);[app postEvent:up atStart:NO];[b mouseDown:down];assert(target.count==1);gea::macos::background_test::checkApplication(app);
+ settle(root);[CATransaction flush];
+ NSBitmapImageRep*rep=[root bitmapImageRepForCachingDisplayInRect:root.bounds];assert(rep);[root cacheDisplayInRect:root.bounds toBitmapImageRep:rep];save([rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}],path);
+ NSBitmapImageRep*layer=[[NSBitmapImageRep alloc]initWithBitmapDataPlanes:nullptr pixelsWide:1280 pixelsHigh:800 bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];NSGraphicsContext*c=[NSGraphicsContext graphicsContextWithBitmapImageRep:layer];assert(c);CGContextScaleCTM(c.CGContext,2,2);[root.layer renderInContext:c.CGContext];save([layer representationUsingType:NSBitmapImageFileTypePNG properties:@{}],[path stringByAppendingString:@".layer.png"]);
+ NSBitmapImageRep*label=[b bitmapImageRepForCachingDisplayInRect:b.bounds];[b cacheDisplayInRect:b.bounds toBitmapImageRep:label];save([label representationUsingType:NSBitmapImageFileTypePNG properties:@{}],[path stringByAppendingString:@".button.png"]);
+ CGFloat low=1,high=0;for(NSInteger y=label.pixelsHigh/4;y<3*label.pixelsHigh/4;++y)for(NSInteger x=label.pixelsWide/5;x<4*label.pixelsWide/5;++x){NSColor*k=[[label colorAtX:x y:y]colorUsingColorSpace:NSColorSpace.sRGBColorSpace];CGFloat r,g,bl,a;[k getRed:&r green:&g blue:&bl alpha:&a];CGFloat v=.2126*r+.7152*g+.0722*bl;low=std::min(low,v);high=std::max(high,v);}
+ fprintf(stderr,"plain AppKit reference: title=%s font=%g appearance=%s titleAttributes=%s inputBG=%s sampleLow=%g sampleHigh=%g\n",b.title.UTF8String,b.font.pointSize,b.effectiveAppearance.name.UTF8String,[b.attributedTitle attributesAtIndex:0 effectiveRange:nullptr].description.UTF8String,field.layer.backgroundColor?[[NSColor colorWithCGColor:field.layer.backgroundColor]description].UTF8String:"nil",low,high);
+ gea::macos::background_test::checkApplication(app);printf("{\"scope\":\"plain AppKit hidden capture reference\",\"actions\":%d,\"foregroundBefore\":%d,\"foregroundAfter\":%d,\"pointerUnchanged\":%s,\"active\":false,\"visible\":false,\"key\":false,\"main\":false}\n",target.count,before,NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier,NSEqualPoints(pointer,NSEvent.mouseLocation)?"true":"false");return 0;
+}}

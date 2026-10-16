@@ -12,6 +12,8 @@ namespace gea::macos {
 
 // Publish arranged geometry for app-owned Gea controls before dispatch.
 void publishControlEventBounds(int nodeId);
+// Called only after AppKit accepts the actual root responder transition.
+void nativeRootFocusChanged(NSView*view,bool focused,int nodeId);
 
 class MacosRenderer {
 public:
