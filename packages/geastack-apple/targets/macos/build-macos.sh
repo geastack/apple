@@ -1983,7 +1983,7 @@ LINK_SIGNATURE_TMP="$LINK_SIGNATURE_FILE.tmp.$$"
   printf 'compiler=%s\n' "$MACOS_COMPILER_VERSION"
   printf 'opt=%s\n' "$GEA_MACOS_OPT_LEVEL"
   printf 'debug=%s\n' "${GEA_MACOS_DEBUG_INFO:-}"
-  printf 'link=%s\n' -Wl,-no_deduplicate
+  printf 'link=%s\n' -Wl,-no_deduplicate -Wl,-U,_gea_embedded_assets_prepare
   printf 'framework=%s\n' "${LINK_FRAMEWORKS[@]}"
   printf 'object=%s\n' "${OBJ_FILES[@]}"
   for library in ${APP_NATIVE_LIBRARIES[@]+"${APP_NATIVE_LIBRARIES[@]}"}; do shasum -a 256 "$library"; done
@@ -2009,8 +2009,14 @@ if (( LINK_NEEDED != 0 )); then
   # address-taken ones included, and the runtime tells callables apart by
   # entry address (CallableObject::callWithReceiver finds a method's receiver
   # check by it), so a folded method template ran its twin's check.
+  # -U _gea_embedded_assets_prepare: core's gea_app_entry.cpp references this
+  # hook weakly, and the embedded-asset generator defines it only for an app
+  # with file-backed asset storage. Unlike an ELF linker, ld64 rejects a weak
+  # reference that nothing defines; -U leaves it to dyld, which binds a missing
+  # weak import to null, so Application::init skips the call.
   macos_run_tracked_child clang++ -std=c++20 -ObjC++ -fobjc-arc "$GEA_MACOS_OPT_LEVEL" ${GEA_MACOS_DEBUG_INFO} \
     -Wl,-no_deduplicate \
+    -Wl,-U,_gea_embedded_assets_prepare \
     "${LINK_FRAMEWORKS[@]}" \
     "${OBJ_FILES[@]}" \
     ${APP_NATIVE_LIBRARIES[@]+"${APP_NATIVE_LIBRARIES[@]}"} \
