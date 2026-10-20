@@ -63,8 +63,11 @@ macos_build_pid_is_running() {
   local pid="$1"
   local state=""
   kill -0 "$pid" 2>/dev/null || return 1
+  # kill -0 already proved the pid exists; only a zombie state rules it out. A
+  # ps that prints nothing (it can, on a loaded machine) must not read as dead,
+  # or the escalation below skips a live descendant that ignores TERM.
   state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
-  [[ -n "$state" && "$state" != Z* ]]
+  [[ "$state" != Z* ]]
 }
 
 macos_terminate_and_reap_build_children() {
