@@ -18,13 +18,17 @@ for (const [name, text] of Object.entries(generateAppleDeclarations(appleSdkFixt
 for (const [name, text] of Object.entries(generateAppleRuntimeModules(appleSdkFixture))) {
   writeFileSync(`${root}/runtime/${basename(name)}.js`, text)
 }
-const names = new Set(['Foundation', 'Dispatch', 'AppKit', 'Security', 'UserNotifications'])
+const names = new Set(['Foundation', 'Dispatch', 'AppKit', 'Security', 'UserNotifications', 'EventKit'])
 const fixture = {
   frameworks: appleSdkFixture.frameworks.filter((framework) => names.has(framework.name))
 }
 const metadata = generateAppleBridgeMetadata(fixture)
 assert.ok(metadata.functions['Foundation.randomUUID'])
 assert.ok(metadata.functions['UserNotifications.scheduleNotification'].bridgeBody)
+const eventKit = appleSdkFixture.frameworks.find((framework) => framework.name === 'EventKit')
+for (const fn of eventKit.functions) assert.ok(metadata.functions[`EventKit.${fn.name}`].bridgeBody, `EventKit.${fn.name} has a bridge body`)
+assert.match(readFileSync(`${root}/generated/EventKit.d.ts`, 'utf8'), /export declare function events\(startISO: string, endISO: string, calendarIdsJSON: string\): string/)
+assert.match(readFileSync(`${root}/runtime/EventKit.js`, 'utf8'), /export function watchChanges\(\)/)
 const out = `${root}/dist`
 appleNativePlugin({ metadata }).createCppBackend({ outDir: out }).transformGeneratedSources([])
 const source = `
@@ -32,7 +36,18 @@ const source = `
 #import <Foundation/Foundation.h>
 #include <cassert>
 #include <cstdio>
+#include <stdexcept>
 #include <string>
+// Starts the asynchronous EventKit calls from a frame that has returned, and
+// then overwrites that stack, before their completions run.
+static void startEventKitCompletions(std::string &spanError, std::string &removeError) {
+  gea::apple::EventKit::saveEvent("{}", "everything", [&](std::string, std::string error) { spanError = error; });
+  gea::apple::EventKit::removeEvent("missing", "", "thisEvent", [&](std::string error) { removeError = error; });
+}
+static void overwriteStack() {
+  volatile char bytes[16384];
+  for (auto &byte : bytes) byte = static_cast<char>(0xA5);
+}
 int main(int argc, char **argv) {
   @autoreleasepool {
     using namespace gea::apple::Foundation;
@@ -63,6 +78,25 @@ int main(int argc, char **argv) {
     bool invalid = false;
     gea::apple::UserNotifications::scheduleNotification("test", "", "", -1, [&](std::string error) { invalid = !error.empty(); });
     assert(invalid);
+    // Calendar access needs a TCC grant, so only behavior that holds without it is checked.
+    using namespace gea::apple::EventKit;
+    const auto status = authorizationStatus();
+    assert(status == "notDetermined" || status == "restricted" || status == "denied" || status == "fullAccess" || status == "writeOnly");
+    if (status != "fullAccess") assert(calendars() == "[]");
+    bool badRange = false;
+    try { events("not a date", "2026-01-02T00:00:00Z", ""); } catch (const std::runtime_error &) { badRange = true; }
+    assert(badRange);
+    std::string spanError, removeError;
+    startEventKitCompletions(spanError, removeError);
+    overwriteStack();
+    const auto eventWatch = watchChanges([]() {});
+    stopWatchingChanges(eventWatch);
+    stopWatchingChanges(eventWatch);
+    const auto callbackDeadline = [NSDate dateWithTimeIntervalSinceNow:2];
+    while ((spanError.empty() || removeError.empty()) && [callbackDeadline timeIntervalSinceNow] > 0) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    assert(spanError == "span must be thisEvent or futureEvents");
+    assert(!removeError.empty());
+    std::printf("EventKit authorization status: %s\\n", status.c_str());
     std::puts("native desktop services passed");
   }
 }
@@ -86,6 +120,8 @@ execFileSync(
     'Security',
     '-framework',
     'UserNotifications',
+    '-framework',
+    'EventKit',
     '-framework',
     'CoreGraphics',
     '-o',
@@ -122,6 +158,7 @@ execFileSync(
 const units = readFileSync(`${out}/geatsc-sources.txt`, 'utf8').trim().split('\n')
 const emitted = units.map((path) => readFileSync(path, 'utf8')).join('\n')
 assert.ok(emitted.includes('gea::apple::Foundation::randomUUID'))
+assert.ok(emitted.includes('gea::apple::EventKit::events'))
 const includes = [
   `${packageRoot('core')}/include`, `${packageRoot('host')}/include`,
   packageRoot('engine'), `${packageRoot('engine')}/ui`,

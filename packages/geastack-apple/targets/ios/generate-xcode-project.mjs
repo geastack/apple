@@ -218,6 +218,7 @@ const frameworks = [
   'Photos.framework',
   'Security.framework',
   'UserNotifications.framework',
+  'EventKit.framework',
   'Metal.framework',
   'MetalKit.framework',
   'Foundation.framework',
