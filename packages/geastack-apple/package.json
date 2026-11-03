@@ -32,6 +32,10 @@
       "types": "./generated/UserNotifications.d.ts",
       "import": "./runtime/UserNotifications.js"
     },
+    "./EventKit": {
+      "types": "./generated/EventKit.d.ts",
+      "import": "./runtime/EventKit.js"
+    },
     "./Dispatch": {
       "types": "./generated/Dispatch.d.ts",
       "import": "./runtime/Dispatch.js"
