@@ -126,7 +126,8 @@ strings, like `SwiftData.fetchModelsJSON`; parse them with `JSON.parse`.
   update changes only the fields given. `span` is `thisEvent` or
   `futureEvents`.
 - `removeEvent(id, occurrenceDate, span, error => …)` removes an event or
-  occurrence (`occurrenceDate` may be `''` for a single event).
+  occurrence. A single event is found by `id` alone, so its `occurrenceDate`
+may be `''` or out of date after the event moved.
 
 Writes to a calendar whose `allowsModifications` is false return an error.
 EventKit cannot add attendees or send invitations; an event saved here has no

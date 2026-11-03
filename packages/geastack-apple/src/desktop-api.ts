@@ -70,15 +70,18 @@ auto eventObject = [&](EKEvent *event) -> NSDictionary * {
 };`
 // An occurrence of a recurring event is addressed by its id plus the
 // occurrenceDate events() reported; it is searched for a week either side.
+// A single event's occurrenceDate is its start, which moves with the event, so
+// a stale one still finds it by id.
 const findEvent = `auto findEvent = [&](NSString *identifier, NSString *occurrence) -> EKEvent * {
   if (occurrence.length == 0) return [store eventWithIdentifier:identifier];
-  NSDate *date = parseDate(occurrence);
-  if (!date) return nil;
-  NSPredicate *predicate = [store predicateForEventsWithStartDate:[date dateByAddingTimeInterval:-7 * 86400]
-    endDate:[date dateByAddingTimeInterval:7 * 86400] calendars:nil];
-  for (EKEvent *candidate in [store eventsMatchingPredicate:predicate])
-    if ([candidate.eventIdentifier isEqualToString:identifier] && fabs([candidate.occurrenceDate timeIntervalSinceDate:date]) < 1) return candidate;
-  return nil;
+  if (NSDate *date = parseDate(occurrence)) {
+    NSPredicate *predicate = [store predicateForEventsWithStartDate:[date dateByAddingTimeInterval:-7 * 86400]
+      endDate:[date dateByAddingTimeInterval:7 * 86400] calendars:nil];
+    for (EKEvent *candidate in [store eventsMatchingPredicate:predicate])
+      if ([candidate.eventIdentifier isEqualToString:identifier] && fabs([candidate.occurrenceDate timeIntervalSinceDate:date]) < 1) return candidate;
+  }
+  EKEvent *single = [store eventWithIdentifier:identifier];
+  return single && !single.hasRecurrenceRules ? single : nil;
 };
 auto eventSpan = [](const std::string &value, EKSpan *span) -> bool {
   if (value == "thisEvent") { *span = EKSpanThisEvent; return true; }
