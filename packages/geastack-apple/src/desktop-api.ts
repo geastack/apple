@@ -409,9 +409,12 @@ if (observer) { [[NSNotificationCenter defaultCenter] removeObserver:observer]; 
         bridgeBody: `${eventStore}
 ${eventDates}
 ${findEvent}
+// The block copies what it names; a reference the lambda captured would
+// dangle once this function returns, so copy the callback into the lambda.
 auto finish = [&](NSString *identifier, std::string error) {
+  auto callback = completed;
   const std::string saved = gea::apple::Foundation::fromNSString(identifier);
-  dispatch_async(dispatch_get_main_queue(), ^{ if (completed) completed(saved, error); });
+  dispatch_async(dispatch_get_main_queue(), ^{ if (callback) callback(saved, error); });
 };
 EKSpan eventKitSpan;
 if (!eventSpan(span, &eventKitSpan)) return finish(nil, "span must be thisEvent or futureEvents");
@@ -464,10 +467,13 @@ finish(event.eventIdentifier, "");`
         bridgeBody: `${eventStore}
 ${eventDates}
 ${findEvent}
-auto finish = [&](std::string error) { dispatch_async(dispatch_get_main_queue(), ^{ if (completed) completed(error); }); };
+auto finish = [&](std::string error) {
+  auto callback = completed;
+  dispatch_async(dispatch_get_main_queue(), ^{ if (callback) callback(error); });
+};
 EKSpan eventKitSpan;
 if (!eventSpan(span, &eventKitSpan)) return finish("span must be thisEvent or futureEvents");
-EKEvent *event = findEvent(gea::apple::Foundation::toNSString(eventId),gea::apple::Foundation::toNSString(occurrenceDate));
+EKEvent *event = findEvent(gea::apple::Foundation::toNSString(eventId), gea::apple::Foundation::toNSString(occurrenceDate));
 if (!event) return finish("No event with that id and occurrenceDate");
 if (!event.calendar.allowsContentModifications) return finish("The event's calendar does not allow modifications");
 NSError *error = nil;

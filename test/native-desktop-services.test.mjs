@@ -38,6 +38,16 @@ const source = `
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+// Starts the asynchronous EventKit calls from a frame that has returned, and
+// then overwrites that stack, before their completions run.
+static void startEventKitCompletions(std::string &spanError, std::string &removeError) {
+  gea::apple::EventKit::saveEvent("{}", "everything", [&](std::string, std::string error) { spanError = error; });
+  gea::apple::EventKit::removeEvent("missing", "", "thisEvent", [&](std::string error) { removeError = error; });
+}
+static void overwriteStack() {
+  volatile char bytes[16384];
+  for (auto &byte : bytes) byte = static_cast<char>(0xA5);
+}
 int main(int argc, char **argv) {
   @autoreleasepool {
     using namespace gea::apple::Foundation;
@@ -77,8 +87,8 @@ int main(int argc, char **argv) {
     try { events("not a date", "2026-01-02T00:00:00Z", ""); } catch (const std::runtime_error &) { badRange = true; }
     assert(badRange);
     std::string spanError, removeError;
-    saveEvent("{}", "everything", [&](std::string, std::string error) { spanError = error; });
-    removeEvent("missing", "", "thisEvent", [&](std::string error) { removeError = error; });
+    startEventKitCompletions(spanError, removeError);
+    overwriteStack();
     const auto eventWatch = watchChanges([]() {});
     stopWatchingChanges(eventWatch);
     stopWatchingChanges(eventWatch);

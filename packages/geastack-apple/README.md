@@ -148,7 +148,10 @@ object is merged over the shared `Info.plist` template:
 }
 ```
 
-A sandboxed or hardened-runtime signed build also needs the
+macOS records the grant against the code signature. A development build is
+signed ad hoc, so every rebuild that changes the executable asks again, and
+`tccutil reset Calendar com.gea.<app-id>` forgets it. A sandboxed or
+hardened-runtime signed build also needs the
 `com.apple.security.personal-information.calendars` entitlement. A Google
 account in macOS syncs only its own calendars by default; switch on shared and
 secondary calendars once at https://www.google.com/calendar/syncselect.
