@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>@APP_EXEC@</string>
+	<key>CFBundleIdentifier</key><string>@BUNDLE_ID@</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>@APP_NAME@</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>0.1.0</string>
+	<key>CFBundleVersion</key><string>1</string>
+	<key>NSCameraUsageDescription</key><string>Gea native examples use the camera to demonstrate AVFoundation preview layers from TypeScript.</string>
+	<key>NSLocationWhenInUseUsageDescription</key><string>Gea native examples use location to demonstrate CoreLocation and MapKit from TypeScript.</string>
+	<key>UIRequiresFullScreen</key><true/>
+	<key>GCSupportsControllerUserInteraction</key><true/>
+	<key>GCSupportsMultipleMicroGamepads</key><true/>
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict><key>ProfileName</key><string>MicroGamepad</string></dict>
+		<dict><key>ProfileName</key><string>DirectionalGamepad</string></dict>
+		<dict><key>ProfileName</key><string>ExtendedGamepad</string></dict>
+	</array>
+</dict>
+</plist>

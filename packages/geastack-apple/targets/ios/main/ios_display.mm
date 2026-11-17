@@ -100,10 +100,11 @@ void Display::clear() { canvas()->clear(0); }
 void Display::clearNoFlush() { canvas()->clear(0); }
 void Display::print(const char *) {}
 
-// No double-buffered framebuffer on the iOS host shim — the canvas is the
-// presented surface — so rebinding is a no-op (the embedded backends use this
-// to re-point the canvas at a freshly-allocated framebuffer).
-void Display::rebindCanvasToFramebuffer() {}
+void Display::rebindCanvasToFramebuffer()
+{
+	if (g_canvas.pixels() != g_framebuffer)
+		g_canvas.bindPixels(g_framebuffer, g_canvas_width, g_canvas_height);
+}
 
 void Display::flush()
 {
@@ -132,10 +133,10 @@ void Display::flushRects(const DisplayFlushRect *rects, int count, bool)
 	g_canvas.resetDirty();
 }
 
-bool Display::streamRect(int x, int y, int w, int h, DisplayStreamRasterFn raster, void *user)
+static bool rasterRect(int x, int y, int w, int h, DisplayStreamRasterFn raster, void *user)
 {
 	ensure_canvas();
-	if (!raster || w <= 0 || h <= 0) return false;
+	if (!g_framebuffer || !raster || w <= 0 || h <= 0) return false;
 	int x0 = std::max(0, x);
 	int y0 = std::max(0, y);
 	int x1 = std::min(g_canvas_width - 1, x + w - 1);
@@ -154,13 +155,30 @@ bool Display::streamRect(int x, int y, int w, int h, DisplayStreamRasterFn raste
 	using native_t = gea::framework::graphics::pixel::native_t;
 	std::vector<native_t> pixels(static_cast<std::size_t>(rw) * static_cast<std::size_t>(rh));
 	raster(pixels.data(), rw, rh, x0, y0, user);
+	Display::rebindCanvasToFramebuffer();
 	for (int row = 0; row < rh; row++) {
 		std::copy_n(&pixels[static_cast<std::size_t>(row) * static_cast<std::size_t>(rw)], rw,
 		            &g_framebuffer[static_cast<std::size_t>((y0 + row) * g_canvas_width + x0)]);
 	}
 	g_canvas.markDirty(x0, y0, x1, y1);
+	return true;
+}
+
+bool Display::streamRect(int x, int y, int w, int h, DisplayStreamRasterFn raster, void *user)
+{
+	if (!rasterRect(x, y, w, h, raster, user)) return false;
 	flush();
 	return true;
+}
+
+void Display::flushRectsRasterized(const DisplayFlushRect *rects, int count, DisplayStreamRasterFn raster, void *user, bool allowPerChunkDrain)
+{
+	if (!rects || count <= 0 || !raster) return;
+	for (int i = 0; i < count; i++) {
+		const auto &rect = rects[i];
+		rasterRect(rect.x0, rect.y0, rect.x1 - rect.x0 + 1, rect.y1 - rect.y0 + 1, raster, user);
+	}
+	flushRects(rects, count, allowPerChunkDrain);
 }
 
 bool Display::present(const DisplayPresentCommand *commands, int command_count)
@@ -325,6 +343,7 @@ DisplayFlushStageDetail Display::flushStageDetail() { return {}; }
 // Orientation is a device-panel concept; the iOS app rotates via UIKit, not by
 // rotating the framebuffer — so the framework rotation hook is a no-op here.
 void applyOrientation(gea::framework::display::DisplayOrientation) {}
+bool autoRotateAllowed() { return false; }
 
 }  // namespace gea::platform::display
 

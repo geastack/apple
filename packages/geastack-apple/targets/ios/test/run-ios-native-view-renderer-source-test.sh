@@ -147,7 +147,7 @@ reject_source "$ROOT/targets/ios/main/ios_main.mm" \
   "drawNativeScrollBounceOverlaysWithImage" \
   "iOS should not draw custom rubber-band bounce overlays"
 require_source "$ROOT/targets/ios/main/ios_main.mm" \
-  "gea::ios::IosRenderer::instance().sync" \
+  "renderer.sync(self.displayView, root)" \
   "iOS app tick should sync UIKit views after running the GEA frame"
 require_source "$ROOT/targets/ios/main/canvas_view.mm" \
   "Tree::instance().canvas" \

@@ -1,3 +1,5 @@
+#include <TargetConditionals.h>
+
 #import <CoreText/CoreText.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -79,7 +81,11 @@ UIFont *fontForFamily(NSString *family, CGFloat size)
 
 UIFont *fontForId(int fontId, CGFloat sizePt)
 {
+#if TARGET_OS_TV
+	const CGFloat size = sizePt > 0 ? sizePt : [UIFont preferredFontForTextStyle:UIFontTextStyleBody].pointSize;
+#else
 	const CGFloat size = sizePt > 0 ? sizePt : [UIFont systemFontSize];
+#endif
 	ensureBundledFontsRegistered();
 
 	const char *familyName = gea::framework::graphics::FontRegistry::familyName(fontId);

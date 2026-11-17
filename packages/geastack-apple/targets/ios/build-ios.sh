@@ -44,7 +44,7 @@ resolve_gea_package() {
     fi
   done
 }
-GEA_CORE="$(resolve_gea_package @geastack/core)"
+GEA_CORE="${GEA_CORE:-$(resolve_gea_package @geastack/core)}"
 [ -n "$GEA_CORE" ] && [ -f "$GEA_CORE/package.json" ] || { echo "Cannot resolve @geastack/core from $BUILD_INVOCATION_CWD — add @geastack/apple to the app's dependencies and run 'npm install' there" >&2; exit 1; }
 GEA_COMPILER="$(resolve_gea_package @geastack/compiler)"
 [ -n "$GEA_COMPILER" ] && [ -f "$GEA_COMPILER/package.json" ] || { echo "Cannot resolve @geastack/compiler from $BUILD_INVOCATION_CWD — add @geastack/apple to the app's dependencies and run 'npm install' there" >&2; exit 1; }
@@ -87,9 +87,23 @@ export GEA_FW_C_SOURCES="$(gea_fw_c_sources)"
 export GEA_FW_INCLUDE_DIRS="$(gea_fw_include_flags | sed "s/^-I//")"
 APP_ID="${1:-bouncing-balls-jsx}"
 DESTINATION="${2:-simulator}"
+export GEA_APPLE_UIKIT_PLATFORM="${3:-ios}"
+PLATFORM_NAME=iOS
+DEVICE_NAME=iPhone
+SIMULATOR_SDK=iphonesimulator
+DEVICE_SDK=iphoneos
+FONT_WIDTHS=750,828,1125,1170,1290
+if [[ "$GEA_APPLE_UIKIT_PLATFORM" == tvos ]]; then
+  PLATFORM_NAME=tvOS
+  DEVICE_NAME="Apple TV"
+  SIMULATOR_SDK=appletvsimulator
+  DEVICE_SDK=appletvos
+  FONT_WIDTHS=1920,3840
+fi
 
-if [[ "$DESTINATION" != "simulator" && "$DESTINATION" != "device" ]]; then
-  echo "usage: targets/ios/build-ios.sh [app-id] [simulator|device]" >&2
+if [[ "$DESTINATION" != "simulator" && "$DESTINATION" != "device" ]] ||
+   [[ "$GEA_APPLE_UIKIT_PLATFORM" != ios && "$GEA_APPLE_UIKIT_PLATFORM" != tvos ]]; then
+  echo "usage: targets/ios/build-ios.sh [app-id] [simulator|device] [ios|tvos]" >&2
   exit 2
 fi
 
@@ -100,7 +114,7 @@ APP_INFO="$(node "$GEA_CLI" apps inspect "$APP_ID" --format shell)" || {
 
 IFS=$'\t' read -r APP_ROOT APP_ENTRY APP_RUNTIME APP_DISPLAY_NAME <<< "$APP_INFO"
 if [[ "$APP_RUNTIME" != "gea" ]]; then
-  echo "iOS target only supports runtime=gea apps for now: $APP_ID is runtime=$APP_RUNTIME" >&2
+  echo "$PLATFORM_NAME target only supports runtime=gea apps for now: $APP_ID is runtime=$APP_RUNTIME" >&2
   exit 1
 fi
 APP_NAME="$(node -e "
@@ -114,7 +128,7 @@ BUNDLE_ID="${GEA_IOS_BUNDLE_IDENTIFIER:-com.gea.${APP_ID//[^A-Za-z0-9]/-}}"
 # next install. The invocation directory is the app the CLI resolved, so output
 # sources, the Xcode project and DerivedData land next to the app's source.
 # GEA_IOS_OUTPUT_DIR overrides the root for a caller that wants it elsewhere.
-IOS_OUTPUT_ROOT="${GEA_IOS_OUTPUT_DIR:-$BUILD_INVOCATION_CWD/dist/ios}"
+IOS_OUTPUT_ROOT="${GEA_IOS_OUTPUT_DIR:-$BUILD_INVOCATION_CWD/dist/$GEA_APPLE_UIKIT_PLATFORM}"
 case "$IOS_OUTPUT_ROOT" in
   /*) ;;
   *) IOS_OUTPUT_ROOT="$(pwd -P)/$IOS_OUTPUT_ROOT" ;;
@@ -129,7 +143,7 @@ mkdir -p "$GENERATED_DIR"
 
 build_font_args=(
   --font-device-pixel-ratio "${GEA_IOS_FONT_DEVICE_PIXEL_RATIOS:-2,3}"
-  --font-viewport-width "${GEA_IOS_FONT_VIEWPORT_WIDTHS:-750,828,1125,1170,1290}"
+  --font-viewport-width "${GEA_IOS_FONT_VIEWPORT_WIDTHS:-$FONT_WIDTHS}"
 )
 
 generate_app() {
@@ -142,7 +156,7 @@ generate_app() {
   info="$(node "$GEA_CLI" apps inspect "$app_id" --format shell)" || return 1
   IFS=$'\t' read -r root entry runtime _name <<< "$info"
   if [[ "$runtime" != "gea" ]]; then
-    echo "iOS target only supports runtime=gea apps: $app_id is runtime=$runtime" >&2
+    echo "$PLATFORM_NAME target only supports runtime=gea apps: $app_id is runtime=$runtime" >&2
     return 1
   fi
   local args=(
@@ -162,7 +176,7 @@ generate_app() {
     --out-dir "$out_dir"
     "${build_font_args[@]}"
   )
-  local native_plugin="$root/ios/geatsc-native-plugin.mjs"
+  local native_plugin="$root/$GEA_APPLE_UIKIT_PLATFORM/geatsc-native-plugin.mjs"
   if [[ -f "$native_plugin" ]]; then
     args+=(--extra-geatsc-plugin "$native_plugin")
   fi
@@ -180,12 +194,12 @@ pick_simulator_device() {
     const input = fs.readFileSync(0, 'utf8');
     if (!input.trim()) process.exit(0);
     const data = JSON.parse(input);
-    const devices = Object.values(data.devices || {}).flat();
-    const iphones = devices.filter((d) => d.isAvailable && /^iPhone/.test(d.name));
-    const booted = iphones.find((d) => d.state === 'Booted');
-    const preferred = booted || iphones[iphones.length - 1];
+    const devices = Object.entries(data.devices || {}).filter(([runtime]) => runtime.includes('.' + process.argv[1] + '-')).flatMap(([, list]) => list);
+    const matching = devices.filter((d) => d.isAvailable && d.deviceTypeIdentifier?.includes(process.argv[2]));
+    const booted = matching.find((d) => d.state === 'Booted');
+    const preferred = booted || matching.find((d) => d.deviceTypeIdentifier?.endsWith('-4K')) || matching[matching.length - 1];
     if (preferred) console.log(preferred.udid);
-  " <<< "$devices_json"
+  " "$PLATFORM_NAME" "${DEVICE_NAME// /-}" <<< "$devices_json"
 }
 
 # Build an xcodebuild -destination string for a simulator UDID using its
@@ -222,9 +236,9 @@ show_simulator_device() {
   /usr/bin/open -a Simulator --args -CurrentDeviceUDID "$udid"
 }
 
-pick_ios_device() {
+pick_device() {
   local output_json
-  output_json="$(mktemp "${TMPDIR:-/tmp}/gea-ios-devices.XXXXXX.json")"
+  output_json="$(mktemp "${TMPDIR:-/tmp}/gea-ios-devices.XXXXXX")"
   if ! xcrun devicectl list devices --timeout "${GEA_IOS_DEVICECTL_TIMEOUT:-30}" --json-output "$output_json" >/dev/null; then
     rm -f "$output_json"
     return 0
@@ -235,24 +249,33 @@ pick_ios_device() {
     const devices = data.result?.devices || [];
     const usable = devices.filter((device) => {
       const hardware = device.hardwareProperties || {};
+      const connection = device.connectionProperties || {};
+      if (process.argv[2] === 'tvOS') {
+        return hardware.platform === 'tvOS' &&
+          hardware.reality !== 'simulated' &&
+          connection.pairingState === 'paired';
+      }
       const props = device.deviceProperties || {};
       const capabilities = device.capabilities || [];
       const features = new Set(capabilities.map((capability) => capability.featureIdentifier));
-      return hardware.platform === 'iOS' &&
+      return hardware.platform === process.argv[2] &&
         hardware.deviceType === 'iPhone' &&
         props.developerModeStatus === 'enabled' &&
-        device.connectionProperties?.tunnelState === 'connected' &&
+        connection.tunnelState === 'connected' &&
         features.has('com.apple.coredevice.feature.installapp') &&
         features.has('com.apple.coredevice.feature.launchapplication');
     });
     usable.sort((a, b) => {
+      const aConnected = a.connectionProperties?.tunnelState === 'connected';
+      const bConnected = b.connectionProperties?.tunnelState === 'connected';
+      if (aConnected !== bConnected) return Number(aConnected) - Number(bConnected);
       const aDate = Date.parse(a.connectionProperties?.lastConnectionDate || '') || 0;
       const bDate = Date.parse(b.connectionProperties?.lastConnectionDate || '') || 0;
       return aDate - bDate;
     });
     const picked = usable[usable.length - 1];
     if (picked) console.log(picked.identifier || picked.hardwareProperties?.udid || picked.deviceProperties?.name || '');
-  " "$output_json"
+  " "$output_json" "$PLATFORM_NAME"
   rm -f "$output_json"
 }
 
@@ -269,44 +292,43 @@ GEA_CLI_BIN="$GEA_CLI" node "$IOS_DIR/generate-xcode-project.mjs" \
   --generated-dir "$GENERATED_DIR" \
   --project-path "$PROJECT_PATH"
 
-SDK="iphonesimulator"
+SDK="$SIMULATOR_SDK"
 SIMULATOR_DEVICE_ID="${GEA_IOS_SIMULATOR_UDID:-}"
-XCODE_DESTINATION="${GEA_IOS_SIMULATOR_DESTINATION:-generic/platform=iOS Simulator}"
-if [[ "$DESTINATION" == "simulator" ]]; then
-  if [[ "$SKIP_LAUNCH" == "1" ]]; then
-    XCODE_DESTINATION="${GEA_IOS_SIMULATOR_DESTINATION:-generic/platform=iOS Simulator}"
-  else
-    if [[ -z "$SIMULATOR_DEVICE_ID" ]]; then
-      SIMULATOR_DEVICE_ID="$(pick_simulator_device)"
-    fi
-    if [[ -z "$SIMULATOR_DEVICE_ID" ]]; then
-      echo "No available iPhone simulator found." >&2
-      exit 1
-    fi
-    # Resolve a name+OS destination (robust against the poisoned enumeration that
-    # a connected real iPhone causes); fall back to id= if the lookup fails.
-    XCODE_DESTINATION="${GEA_IOS_SIMULATOR_DESTINATION:-}"
-    if [[ -z "$XCODE_DESTINATION" ]]; then
-      XCODE_DESTINATION="$(sim_destination_for_udid "$SIMULATOR_DEVICE_ID")"
-      [[ -z "$XCODE_DESTINATION" ]] && XCODE_DESTINATION="platform=iOS Simulator,id=$SIMULATOR_DEVICE_ID"
-    fi
+XCODE_DESTINATION="${GEA_IOS_SIMULATOR_DESTINATION:-generic/platform=$PLATFORM_NAME Simulator}"
+if [[ "$DESTINATION" == "simulator" && "$SKIP_LAUNCH" != "1" ]]; then
+  if [[ -z "$SIMULATOR_DEVICE_ID" ]]; then
+    SIMULATOR_DEVICE_ID="$(pick_simulator_device)"
+  fi
+  if [[ -z "$SIMULATOR_DEVICE_ID" ]]; then
+    echo "No available $DEVICE_NAME simulator found." >&2
+    exit 1
+  fi
+  XCODE_DESTINATION="${GEA_IOS_SIMULATOR_DESTINATION:-}"
+  if [[ -z "$XCODE_DESTINATION" && "$GEA_APPLE_UIKIT_PLATFORM" == ios ]]; then
+    XCODE_DESTINATION="$(sim_destination_for_udid "$SIMULATOR_DEVICE_ID")"
+  fi
+  if [[ -z "$XCODE_DESTINATION" ]]; then
+    XCODE_DESTINATION="platform=$PLATFORM_NAME Simulator,id=$SIMULATOR_DEVICE_ID"
   fi
 fi
 EXTRA_BUILD_SETTINGS=()
 EXTRA_XCODEBUILD_ARGS=()
 IOS_DEVICE_ID="${GEA_IOS_DEVICE_ID:-}"
 if [[ "$DESTINATION" == "device" ]]; then
-  SDK="iphoneos"
-  XCODE_DESTINATION="${GEA_IOS_DEVICE_DESTINATION:-generic/platform=iOS}"
+  SDK="$DEVICE_SDK"
+  XCODE_DESTINATION="${GEA_IOS_DEVICE_DESTINATION:-generic/platform=$PLATFORM_NAME}"
   if [[ -z "$IOS_DEVICE_ID" && "$SKIP_LAUNCH" != "1" ]]; then
-    IOS_DEVICE_ID="$(pick_ios_device)"
+    IOS_DEVICE_ID="$(pick_device)"
     if [[ -n "$IOS_DEVICE_ID" ]]; then
-      echo "Using iOS device $IOS_DEVICE_ID. Override with GEA_IOS_DEVICE_ID." >&2
+      echo "Using $PLATFORM_NAME device $IOS_DEVICE_ID. Override with GEA_IOS_DEVICE_ID." >&2
     fi
   fi
   if [[ -z "$IOS_DEVICE_ID" && "$SKIP_LAUNCH" != "1" ]]; then
-    echo "No available iPhone device found for install or launch." >&2
-    echo "Connect an iPhone with Developer Mode enabled, or set GEA_IOS_DEVICE_ID." >&2
+    echo "No available $DEVICE_NAME device found for install or launch." >&2
+    echo "Pair your $DEVICE_NAME with Xcode, or set GEA_IOS_DEVICE_ID." >&2
+    if [[ "$GEA_APPLE_UIKIT_PLATFORM" == ios ]]; then
+      echo "Enable Developer Mode on the iPhone before launching." >&2
+    fi
     exit 1
   fi
   DEVELOPMENT_TEAM="${GEA_IOS_DEVELOPMENT_TEAM:-}"
@@ -321,15 +343,26 @@ if [[ "$DESTINATION" == "device" ]]; then
     if [[ "$SKIP_LAUNCH" != "1" ]]; then
       echo "Device builds require GEA_IOS_DEVELOPMENT_TEAM for Xcode automatic signing." >&2
       echo "The script also checks Xcode preferences and installed provisioning profiles, but no unambiguous team was found." >&2
-      echo "Example: GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 targets/ios/build-ios.sh $APP_ID device" >&2
+      echo "Example: GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 gea run --target $GEA_APPLE_UIKIT_PLATFORM --mode device --app $APP_ID" >&2
       exit 1
     fi
-    echo "GEA_IOS_DEVELOPMENT_TEAM is not set; building an unsigned iphoneos binary." >&2
-    echo "Set GEA_IOS_DEVELOPMENT_TEAM to install or launch on an iPhone." >&2
+    echo "GEA_IOS_DEVELOPMENT_TEAM is not set; building an unsigned $DEVICE_SDK binary." >&2
+    echo "Set GEA_IOS_DEVELOPMENT_TEAM to install or launch on your $DEVICE_NAME." >&2
     EXTRA_BUILD_SETTINGS+=("CODE_SIGNING_ALLOWED=NO")
     EXTRA_BUILD_SETTINGS+=("CODE_SIGNING_REQUIRED=NO")
     EXTRA_BUILD_SETTINGS+=("CODE_SIGN_IDENTITY=")
   else
+    if [[ "$GEA_APPLE_UIKIT_PLATFORM" == tvos && -n "$IOS_DEVICE_ID" && -z "${GEA_IOS_DEVICE_DESTINATION:-}" ]]; then
+      DEVICE_UDID="$(xcrun devicectl device info details --device "$IOS_DEVICE_ID" \
+        --quiet --timeout "${GEA_IOS_DEVICECTL_TIMEOUT:-30}" --json-output /dev/stdout | node -e '
+          const device = JSON.parse(require("node:fs").readFileSync(0, "utf8")).result;
+          if (device.hardwareProperties?.platform !== "tvOS" || device.hardwareProperties.reality === "simulated") {
+            throw new Error("Select a physical Apple TV with GEA_IOS_DEVICE_ID.");
+          }
+          process.stdout.write(device.hardwareProperties.udid);
+        ')"
+      XCODE_DESTINATION="platform=tvOS,id=$DEVICE_UDID"
+    fi
     EXTRA_BUILD_SETTINGS+=("DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM")
     EXTRA_BUILD_SETTINGS+=("CODE_SIGN_STYLE=Automatic")
     ALLOW_PROVISIONING_UPDATES="${GEA_IOS_ALLOW_PROVISIONING_UPDATES:-}"
@@ -337,9 +370,12 @@ if [[ "$DESTINATION" == "device" ]]; then
       ALLOW_PROVISIONING_UPDATES="1"
     fi
     if [[ "$ALLOW_PROVISIONING_UPDATES" == "1" ]]; then
-      echo "Allowing Xcode to create or update iOS provisioning profiles." >&2
+      echo "Allowing Xcode to create or update $PLATFORM_NAME provisioning profiles." >&2
       echo "Set GEA_IOS_ALLOW_PROVISIONING_UPDATES=0 to disable this." >&2
       EXTRA_XCODEBUILD_ARGS+=("-allowProvisioningUpdates")
+      if [[ "$GEA_APPLE_UIKIT_PLATFORM" == tvos && "$XCODE_DESTINATION" != generic/* ]]; then
+        EXTRA_XCODEBUILD_ARGS+=("-allowProvisioningDeviceRegistration")
+      fi
     fi
   fi
 fi
@@ -348,7 +384,7 @@ fi
 # real iPhone lacks its device-support platform — even an explicit simulator
 # destination then fails to match. Retry on that specific flake (re-settling the
 # sim first); any other failure breaks out immediately.
-XCODEBUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/gea-ios-xcodebuild.XXXXXX.log")"
+XCODEBUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/gea-ios-xcodebuild.XXXXXX")"
 XCODEBUILD_ATTEMPTS="${GEA_IOS_BUILD_ATTEMPTS:-3}"
 xcodebuild_status=1
 for ((xcodebuild_attempt = 1; xcodebuild_attempt <= XCODEBUILD_ATTEMPTS; xcodebuild_attempt++)); do
@@ -388,7 +424,7 @@ if [[ "$DESTINATION" == "simulator" && "$SKIP_LAUNCH" != "1" ]]; then
     SIMULATOR_DEVICE_ID="$(pick_simulator_device)"
   fi
   if [[ -z "$SIMULATOR_DEVICE_ID" ]]; then
-    echo "No available iPhone simulator found; build succeeded without launch." >&2
+    echo "No available $DEVICE_NAME simulator found; build succeeded without launch." >&2
     exit 0
   fi
   show_simulator_device "$SIMULATOR_DEVICE_ID"
@@ -400,10 +436,10 @@ fi
 
 if [[ "$DESTINATION" == "device" && "$SKIP_LAUNCH" != "1" ]]; then
   if [[ -z "$IOS_DEVICE_ID" ]]; then
-    IOS_DEVICE_ID="$(pick_ios_device)"
+    IOS_DEVICE_ID="$(pick_device)"
   fi
   if [[ -z "$IOS_DEVICE_ID" ]]; then
-    echo "No available iPhone device found; build succeeded without launch." >&2
+    echo "No available $DEVICE_NAME device found; build succeeded without launch." >&2
     exit 0
   fi
   xcrun devicectl --timeout "${GEA_IOS_DEVICECTL_TIMEOUT:-60}" device install app --device "$IOS_DEVICE_ID" "$APP_PRODUCT"

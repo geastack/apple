@@ -2,6 +2,7 @@
 
 #include "ui/tree_internal.h"
 
+#include <TargetConditionals.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -84,7 +85,9 @@ bool rectNearlyEqual(CGRect a, CGRect b)
 		self.showsHorizontalScrollIndicator = NO;
 		self.delaysContentTouches = NO;
 		self.canCancelContentTouches = YES;
+#if !TARGET_OS_TV
 		self.scrollsToTop = NO;
+#endif
 		if (@available(iOS 11.0, *)) self.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
 		_contentView = [[UIView alloc] initWithFrame:CGRectZero];
 		_contentView.userInteractionEnabled = NO;
