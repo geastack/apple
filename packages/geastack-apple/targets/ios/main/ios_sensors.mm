@@ -1,6 +1,9 @@
 #include "imu.h"
 #include "touch.h"
 
+#include <TargetConditionals.h>
+
+#if !TARGET_OS_TV
 #import <CoreMotion/CoreMotion.h>
 #import <Foundation/Foundation.h>
 
@@ -203,6 +206,25 @@ double Accelerometer::gyroscopeZ()
 void Accelerometer::setWebTilt(int, int) {}
 
 }  // namespace gea::platform::sensors
+
+#else
+namespace gea::platform::sensors {
+
+void Accelerometer::init() {}
+void Accelerometer::close() {}
+void Accelerometer::calibrateBias() {}
+int Accelerometer::tiltX() { return 0; }
+int Accelerometer::tiltY() { return 0; }
+double Accelerometer::accelerationX() { return 0.0; }
+double Accelerometer::accelerationY() { return 0.0; }
+double Accelerometer::accelerationZ() { return 9.80665; }  // gravity, plate flat
+double Accelerometer::gyroscopeX() { return 0.0; }
+double Accelerometer::gyroscopeY() { return 0.0; }
+double Accelerometer::gyroscopeZ() { return 0.0; }
+void Accelerometer::setWebTilt(int, int) {}
+
+}  // namespace gea::platform::sensors
+#endif
 
 namespace gea::platform::touch {
 

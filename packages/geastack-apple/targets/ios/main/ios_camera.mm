@@ -280,6 +280,16 @@ DeviceInfo Camera::deviceAt(int index)
 	return {"back", Facing::Back, 0, 0};
 }
 
+void Camera::drawPreview(int x, int y, int width, int height)
+{
+	auto &camera = state();
+	std::lock_guard<std::mutex> lock(camera.frameMutex);
+	if (camera.latestFrame.empty()) return;
+	gea::platform::display::Display::blitImageScaled(
+	    camera.latestFrame.data(), nullptr, camera.latestWidth, camera.latestHeight,
+	    x, y, width > 0 ? width : camera.latestWidth, height > 0 ? height : camera.latestHeight);
+}
+
 int Camera::previewMode() { return 1; }  // NativeOverlay
 
 bool Camera::fillPreview(gea::framework::graphics::pixel::native_t *, int, int, int, bool)

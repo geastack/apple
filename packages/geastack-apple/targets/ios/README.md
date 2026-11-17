@@ -59,3 +59,24 @@ The Xcode project is generated under
 `<app>/dist/ios/<app-id>/GeaIos.xcodeproj`. Open it after running the script
 if you want to inspect signing or launch through Xcode. Do not hand-edit it as
 the source of truth.
+
+## tvOS
+
+Apps that declare `gea.targets.tvos` can use the shared UIKit host on tvOS 17
+or later. Install the tvOS platform in Xcode's Components settings. From the
+Geastack examples project, run the JSX demo on an Apple TV simulator:
+
+```sh
+gea run --target tvos --app bouncing-balls-jsx
+```
+
+For a physical Apple TV, pair it with Xcode over the local network and use an
+Apple development team configured for the device:
+
+```sh
+GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 gea run --target tvos --mode device --app bouncing-balls-jsx
+```
+
+Use `gea build` with the same options to generate the Xcode project and build
+without launching. Outputs are under the app's `dist/tvos`. The UIKit build
+script shares its signing, device selection, and simulator overrides with iOS.

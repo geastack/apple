@@ -59,14 +59,22 @@ const appIconAssetsDir = path.join(generatedDir, 'Assets.xcassets')
 // compile a catalog unless an installed simulator runtime's build matches the SDK
 // exactly (e.g. SDK 23F81a needs a 23F81a runtime, not a 23F73 one) — a skew that
 // blocks otherwise-fine builds. Skipping it yields an app with the default icon.
-const skipAppIcon = process.env.GEA_IOS_SKIP_APP_ICON === '1'
+const tvos = process.env.GEA_APPLE_UIKIT_PLATFORM === 'tvos'
+const buildConfig = process.env.GEA_BUILD_CONFIG_JSON
+  ? JSON.parse(fs.readFileSync(process.env.GEA_BUILD_CONFIG_JSON, 'utf8'))
+  : {}
+const viewport = buildConfig.settings?.display || {}
+if ((viewport.width === undefined) !== (viewport.height === undefined))
+  fail('Set both display.width and display.height for the UIKit rendering resolution.')
+
+const skipAppIcon = tvos || process.env.GEA_IOS_SKIP_APP_ICON === '1'
 
 fs.rmSync(projectPath, { recursive: true, force: true })
 fs.mkdirSync(path.join(projectPath, 'project.xcworkspace'), { recursive: true })
 fs.mkdirSync(path.join(projectPath, 'xcshareddata/xcschemes'), { recursive: true })
 if (!skipAppIcon) gea(['apps', 'apple-icons', appId, '--platform', 'ios', '--assets-dir', appIconAssetsDir])
 
-const plistTemplate = fs.readFileSync(path.join(iosDir, 'Info.plist.in'), 'utf8')
+const plistTemplate = fs.readFileSync(path.join(iosDir, tvos ? 'Info-tvOS.plist.in' : 'Info.plist.in'), 'utf8')
 fs.writeFileSync(
   plistOut,
   plistTemplate
@@ -118,7 +126,7 @@ function nativeSourceKind(file) {
 }
 
 function findAppNativeSources() {
-  const dir = path.join(appRoot, 'ios')
+  const dir = path.join(appRoot, tvos ? 'tvos' : 'ios')
   if (!fs.existsSync(dir)) return []
   const out = []
   const visit = (current) => {
@@ -157,7 +165,10 @@ const rendererSources = [
   'renderer/native_scroll_container.mm',
   'renderer/view_reconciler.mm',
 ].map((file) => source(path.join(iosDir, 'main', file), 'sourcecode.cpp.objcpp'))
-const appNativeSources = findAppNativeSources()
+const appNativeSources = [...new Map([
+  ...findAppNativeSources(),
+  ...(appMeta.nativeSourcePaths || []).map((file) => source(file, nativeSourceKind(file))),
+].map((entry) => [entry.file, entry])).values()]
 const sources = [
   source(path.join(iosDir, 'main/ios_main.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_root_background.cpp')),
@@ -200,7 +211,7 @@ const fontResources = findFontResources().map((file) => resource(file))
 const appIconAssets = resource(appIconAssetsDir, 'folder.assetcatalog')
 const appIconResources = skipAppIcon ? [] : [appIconAssets]
 const uiTestSource = source(path.join(iosDir, 'test/GeaIosRubberBandUITests.swift'), 'sourcecode.swift')
-const uiTestSources = existing(uiTestSource) ? [uiTestSource] : []
+const uiTestSources = tvos ? [] : existing(uiTestSource) ? [uiTestSource] : []
 const hasUiTests = uiTestSources.length > 0
 
 const frameworks = [
@@ -208,7 +219,7 @@ const frameworks = [
   'QuartzCore.framework',
   'CoreGraphics.framework',
   'CoreText.framework',
-  'CoreMotion.framework',
+  tvos ? 'GameController.framework' : 'CoreMotion.framework',
   'CoreLocation.framework',
   'CoreMedia.framework',
   'CoreVideo.framework',
@@ -218,6 +229,7 @@ const frameworks = [
   'Photos.framework',
   'Security.framework',
   'UserNotifications.framework',
+  ...(!tvos ? ['EventKit.framework'] : []),
   'Metal.framework',
   'MetalKit.framework',
   'Foundation.framework',
@@ -293,7 +305,8 @@ const uiTestProductRef = hasUiTests
 const includePaths = [
   path.join(iosDir, 'main'),
   generatedDir,
-  path.join(appRoot, 'ios'),
+  path.join(appRoot, tvos ? 'tvos' : 'ios'),
+  ...new Set(appNativeSources.map(({ file }) => path.dirname(file))),
   // Framework include roots (core/host/engine includes + vendor/stb + AnimatedGIF)
   // from the shared manifest gea_sources.sh, passed by build-ios.sh via env.
   ...(process.env.GEA_FW_INCLUDE_DIRS || '').split('\n').filter(Boolean),
@@ -306,6 +319,10 @@ const includePaths = [
 function buildSettings(configuration) {
   const preprocessorDefinitions = [
     'GEA_EMBEDDED_GIF_C_API=1',
+    ...(viewport.width === undefined ? [] : [
+      `GEA_UIKIT_VIEWPORT_WIDTH=${viewport.width}`,
+      `GEA_UIKIT_VIEWPORT_HEIGHT=${viewport.height}`,
+    ]),
     'GEA_EMBEDDED_ENABLE_NATIVE_TEXT_INPUT=1',
     'GEA_EMBEDDED_ENABLE_VIRTUAL_KEYBOARD=0',
     'GEA_CPP_USE_TO_CHARS_DOUBLE=0',
@@ -332,16 +349,16 @@ function buildSettings(configuration) {
 				GCC_PREPROCESSOR_DEFINITIONS = (${preprocessorDefinitions.map(q).join(', ')});
 				HEADER_SEARCH_PATHS = (${includePaths.map(q).join(', ')});
 				INFOPLIST_FILE = ${q(plistOut)};
-				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				${tvos ? 'TVOS_DEPLOYMENT_TARGET = 17.0;' : 'IPHONEOS_DEPLOYMENT_TARGET = 16.0;'}
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				ONLY_ACTIVE_ARCH = ${configuration === 'Debug' ? 'YES' : 'NO'};
 				OTHER_LDFLAGS = ("$(inherited)", "-Wl,-no_deduplicate");
 				PRODUCT_BUNDLE_IDENTIFIER = ${q(bundleId)};
 				PRODUCT_NAME = ${q(appName)};
-				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SDKROOT = ${tvos ? 'appletvos' : 'iphoneos'};
+				SUPPORTED_PLATFORMS = "${tvos ? 'appletvos appletvsimulator' : 'iphoneos iphonesimulator'}";
 				SUPPORTS_MACCATALYST = NO;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "${tvos ? '3' : '1,2'}";
 			}`
 }
 

@@ -365,16 +365,6 @@ if [[ "$MACOS_PIPELINE_CACHE" == "0" ]]; then rm -rf "$RES_DIR"; fi
 mkdir -p "$MACOS_DIR" "$RES_DIR" "$BUILD_DIR"
 BUNDLE_CONTENT_CHANGED=0
 
-INFO_PLIST_TMP="$BUILD_DIR/Info.plist.tmp.$$"
-sed -e "s/@APP_EXEC@/$APP_EXEC/g" \
-    -e "s/@APP_ID@/$APP_ID/g" \
-    -e "s/@APP_NAME@/$APP_NAME/g" \
-    "$ROOT_DIR/targets/macos/Info.plist.in" > "$INFO_PLIST_TMP"
-if replace_content_stable "$APP_BUNDLE/Contents/Info.plist" "$INFO_PLIST_TMP"; then
-  BUNDLE_CONTENT_CHANGED=1
-fi
-timing_mark bootstrap
-
 # Resolve package metadata once per app. Bash 3.2 has no associative arrays, so
 # keep parallel indexed arrays and publish the result through a global instead
 # of command substitution (which would update the cache in a subshell).
@@ -404,6 +394,22 @@ resolve_app_dir() {
   IFS=$'\t' read -r root _entry _runtime _name < <(printf "%s\n" "$RESOLVED_APP_META")
   echo "$root"
 }
+
+# Info.plist comes from the shared template plus the optional `infoPlist`
+# object of apps/<id>/macos.json (usage descriptions and other per-app keys).
+INFO_PLIST_TMP="$BUILD_DIR/Info.plist.tmp.$$"
+sed -e "s/@APP_EXEC@/$APP_EXEC/g" \
+    -e "s/@APP_ID@/$APP_ID/g" \
+    -e "s/@APP_NAME@/$APP_NAME/g" \
+    "$ROOT_DIR/targets/macos/Info.plist.in" > "$INFO_PLIST_TMP"
+INFO_PLIST_APP_DIR="$(resolve_app_dir "$APP_ID")"
+if [[ -n "$INFO_PLIST_APP_DIR" && -f "$INFO_PLIST_APP_DIR/macos.json" ]]; then
+  node "$ROOT_DIR/targets/macos/merge-info-plist.mjs" "$INFO_PLIST_TMP" "$INFO_PLIST_APP_DIR/macos.json"
+fi
+if replace_content_stable "$APP_BUNDLE/Contents/Info.plist" "$INFO_PLIST_TMP"; then
+  BUNDLE_CONTENT_CHANGED=1
+fi
+timing_mark bootstrap
 
 # Cheap read-only equivalent of the post-generation finalizer for no-op cache
 # validation. Avoiding a Node process per resident saves meaningful traversal
@@ -1962,6 +1968,7 @@ if [[ "$APPLE_NATIVE" == "1" ]]; then
     -framework Metal -framework MetalKit -framework MapKit
     -framework CoreLocation -framework AVFoundation -framework CoreMedia
     -framework Photos -framework Security -framework UserNotifications
+    -framework EventKit
   )
 fi
 

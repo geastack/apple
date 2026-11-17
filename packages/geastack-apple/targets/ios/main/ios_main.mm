@@ -1,10 +1,19 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 
+#include <TargetConditionals.h>
+
+#if TARGET_OS_TV
+#import <GameController/GameController.h>
+#endif
+
 #include "app.h"
 #include "apps.h"
 #include "canvas.h"
+#include "css/animation.h"
+#include "css/declarative.h"
 #include "display.h"
+#include "display_underlay.h"
 #include "event.h"
 #include "events.h"
 #include "font_registry.h"
@@ -198,6 +207,113 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 
 @end
 
+#if TARGET_OS_TV
+static void dispatchRemoteKey(int keyCode)
+{
+	auto &tree = gea::embedded::ui::Tree::instance();
+	const int root = tree.mountedRoot();
+	if (root < 0) return;
+
+	gea::framework::events::PointerEvent event;
+	event.targetId = tree.firstChildOf(root);
+	if (event.targetId < 0) event.targetId = root;
+	event.type = gea::framework::events::PointerEventType::KeyDown;
+	event.keyCode = keyCode;
+	const bool delivered = gea::embedded::ui::dispatchRootKeyEvent(event, true);
+	if (std::getenv("GEA_TV_INPUT_DIAGNOSTICS"))
+		NSLog(@"[Gea TV] key=%d root=%d target=%d delivered=%d", keyCode, root, event.targetId, delivered);
+}
+
+@interface GeaTVController : GCEventViewController
+@property(nonatomic, weak) GCMotion *remoteMotion;
+@property(nonatomic, assign) BOOL tiltReady;
+@property(nonatomic, strong) NSHashTable<GCController *> *configuredControllers;
+- (void)pollRemoteMotion;
+@end
+
+@implementation GeaTVController
+- (BOOL)canBecomeFirstResponder { return YES; }
+
+- (void)viewDidAppear:(BOOL)animated
+{
+	[super viewDidAppear:animated];
+	[self becomeFirstResponder];
+}
+
+- (void)pollRemoteMotion
+{
+	if (!self.configuredControllers) self.configuredControllers = [NSHashTable weakObjectsHashTable];
+	for (GCController *controller in GCController.controllers) {
+		if ([self.configuredControllers containsObject:controller]) continue;
+		[self.configuredControllers addObject:controller];
+		controller.handlerQueue = dispatch_get_main_queue();
+		GCMicroGamepad *remote = controller.microGamepad;
+		if (remote) remote.reportsAbsoluteDpadValues = YES;
+		GCExtendedGamepad *pad = controller.extendedGamepad;
+		const bool directionalRemote = [remote isKindOfClass:GCDirectionalGamepad.class];
+		// The silver remote's generic dpad is its touch surface and buttonA
+		// means a click anywhere, including the direction ring. Use the
+		// dedicated physical ring and center elements to keep actions separate.
+		GCControllerDirectionPad *directions = directionalRemote
+		    ? remote.dpads[GCInputDirectionalCardinalDpad]
+		    : (remote ? remote.dpad : pad.dpad);
+		directions.left.pressedChangedHandler = ^(GCControllerButtonInput *, float, BOOL pressed) {
+			if (pressed) dispatchRemoteKey(37);
+		};
+		directions.right.pressedChangedHandler = ^(GCControllerButtonInput *, float, BOOL pressed) {
+			if (pressed) dispatchRemoteKey(39);
+		};
+		directions.up.pressedChangedHandler = ^(GCControllerButtonInput *, float, BOOL pressed) {
+			if (pressed) dispatchRemoteKey(38);
+		};
+		directions.down.pressedChangedHandler = ^(GCControllerButtonInput *, float, BOOL pressed) {
+			if (pressed) dispatchRemoteKey(40);
+		};
+		GCControllerButtonInput *select = directionalRemote
+		    ? remote.buttons[GCInputDirectionalCenterButton]
+		    : (remote ? remote.buttonA : pad.buttonA);
+		select.pressedChangedHandler = ^(GCControllerButtonInput *, float, BOOL pressed) {
+			if (pressed) dispatchRemoteKey(13);
+		};
+		GCControllerButtonInput *back = remote ? remote.buttonMenu : pad.buttonMenu;
+		back.pressedChangedHandler = ^(GCControllerButtonInput *, float, BOOL pressed) {
+			if (pressed) dispatchRemoteKey(27);
+		};
+		GCControllerButtonInput *dive = remote ? remote.buttonX : pad.buttonX;
+		dive.pressedChangedHandler = ^(GCControllerButtonInput *, float, BOOL pressed) {
+			if (pressed) dispatchRemoteKey(40);
+		};
+		if (std::getenv("GEA_TV_INPUT_DIAGNOSTICS"))
+			NSLog(@"[Gea TV] controller=%@ profile=%@ motion=%d", controller.vendorName,
+			      NSStringFromClass(remote ? remote.class : pad.class), controller.motion != nil);
+	}
+	GCMotion *motion = nil;
+	for (GCController *controller in GCController.controllers) {
+		if (!controller.motion) continue;
+		motion = controller.motion;
+		if (controller.microGamepad) break;
+	}
+	if (motion != self.remoteMotion) {
+		GCMotion *previous = self.remoteMotion;
+		if (previous.sensorsRequireManualActivation) previous.sensorsActive = NO;
+		self.remoteMotion = motion;
+		self.tiltReady = NO;
+		if (motion.sensorsRequireManualActivation) motion.sensorsActive = YES;
+	}
+	if (!motion) return;
+	if (motion.sensorsRequireManualActivation && !motion.sensorsActive) motion.sensorsActive = YES;
+
+	// Hold the remote upright with its buttons facing you. Re-center before
+	// the next lane change so a held tilt only generates one input.
+	const double sideways = motion.hasGravityAndUserAcceleration ? motion.gravity.x : motion.acceleration.x;
+	if (std::abs(sideways) < 0.16) self.tiltReady = YES;
+	if (!self.tiltReady || std::abs(sideways) < 0.34) return;
+	self.tiltReady = NO;
+	dispatchRemoteKey(sideways < 0 ? 37 : 39);
+}
+@end
+#endif
+
 @interface GeaDisplayView : UIView
 @property(nonatomic, strong) NSMapTable<UITouch *, NSNumber *> *touchPointerIds;
 - (void)syncNativeTextInputs;
@@ -216,7 +332,9 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		// Track multiple simultaneous fingers so one button can be held while
 		// another is tapped (e.g. move + jump). Keyed by touch identity; the
 		// value is the pointer index (0 = primary).
+#if !TARGET_OS_TV
 		self.multipleTouchEnabled = YES;
+#endif
 		self.touchPointerIds = [NSMapTable mapTableWithKeyOptions:NSMapTableWeakMemory | NSMapTableObjectPointerPersonality
 		                                             valueOptions:NSMapTableStrongMemory];
 	}
@@ -452,6 +570,12 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
              touching:(bool)touching
 {
 	if (!touch) return;
+#if TARGET_OS_TV
+	// Remote touch coordinates describe the clickpad, not positions on the TV.
+	// GameController owns that input; forwarding it as pointer gestures sends
+	// a second, unrelated action whenever a thumb touches or moves on the pad.
+	if (touch.type == UITouchTypeIndirect) return;
+#endif
 	const BOOL isDown = phase == gea::framework::events::TouchPhase::Down;
 	const int pointerId = [self pointerIdForTouch:touch assignIfAbsent:isDown];
 	if (pointerId < 0) return;
@@ -562,11 +686,15 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 - (void)layoutDisplayViewInSafeArea
 {
 	if (!self.rootView || !self.displayView) return;
+#if TARGET_OS_TV
+	CGRect frame = self.rootView.bounds;
+#else
 	CGRect frame = self.rootView.safeAreaLayoutGuide.layoutFrame;
 	if (frame.size.width <= 0 || frame.size.height <= 0) {
 		frame = UIEdgeInsetsInsetRect(self.rootView.bounds, self.rootView.safeAreaInsets);
 	}
 	if (frame.size.width <= 0 || frame.size.height <= 0) frame = self.rootView.bounds;
+#endif
 	self.displayView.frame = frame;
 	if (self.nativeRootView) self.nativeRootView.frame = self.rootView.bounds;
 }
@@ -590,6 +718,9 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 
 - (CGSize)viewportSize
 {
+#if defined(GEA_UIKIT_VIEWPORT_WIDTH) && defined(GEA_UIKIT_VIEWPORT_HEIGHT)
+	return CGSizeMake(GEA_UIKIT_VIEWPORT_WIDTH, GEA_UIKIT_VIEWPORT_HEIGHT);
+#endif
 	CGSize size = self.displayView.bounds.size;
 	if (size.width <= 0 || size.height <= 0) size = self.rootView.safeAreaLayoutGuide.layoutFrame.size;
 	if (size.width <= 0 || size.height <= 0) size = self.rootView.bounds.size;
@@ -616,12 +747,42 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	self.displayView.backgroundColor = color;
 }
 
+// Apps linked against the iOS/tvOS 27 SDKs must adopt the scene lifecycle:
+// UIKit traps at launch otherwise. The window and everything that hangs off it
+// is built when the scene connects (GeaSceneDelegate), not at launch.
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
 {
 	(void)application;
 	(void)launchOptions;
-	self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+	gGeaAppDelegate = self;
+	return YES;
+}
+
+- (UISceneConfiguration *)application:(UIApplication *)application
+    configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession
+                                   options:(UISceneConnectionOptions *)options
+{
+	(void)application;
+	(void)options;
+	UISceneConfiguration *configuration = [[UISceneConfiguration alloc] initWithName:@"Default"
+	                                                                     sessionRole:connectingSceneSession.role];
+	configuration.delegateClass = NSClassFromString(@"GeaSceneDelegate");
+	return configuration;
+}
+
+- (void)startInWindowScene:(UIWindowScene *)scene
+{
+	if (self.window) return;
+	UIApplication *application = UIApplication.sharedApplication;
+	self.window = [[UIWindow alloc] initWithWindowScene:scene];
+#if TARGET_OS_TV
+	GeaTVController *controller = [[GeaTVController alloc] init];
+	controller.controllerUserInteractionEnabled = NO;
+	application.idleTimerDisabled = YES;
+#else
+	(void)application;
 	UIViewController *controller = [[UIViewController alloc] init];
+#endif
 	self.rootView = [[UIView alloc] initWithFrame:self.window.bounds];
 	self.rootView.opaque = YES;
 	self.rootView.backgroundColor = UIColor.blackColor;
@@ -632,6 +793,9 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 	controller.view = self.rootView;
 	self.window.rootViewController = controller;
 	[self.window makeKeyAndVisible];
+#if TARGET_OS_TV
+	[controller becomeFirstResponder];
+#endif
 	[self.rootView layoutIfNeeded];
 	[self layoutDisplayViewInSafeArea];
 	gGeaAppDelegate = self;
@@ -667,21 +831,110 @@ bool attributedStringHasTextDecoration(NSAttributedString *value)
 		self.displayLink.preferredFramesPerSecond = 60;
 	}
 	[self.displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
-	return YES;
+}
+
+- (void)applicationWillResignActive:(UIApplication *)application
+{
+	(void)application;
+	self.displayLink.paused = YES;
+#if TARGET_OS_TV
+	GCMotion *motion = ((GeaTVController *)self.window.rootViewController).remoteMotion;
+	if (motion.sensorsRequireManualActivation) motion.sensorsActive = NO;
+#endif
+}
+
+- (void)applicationDidEnterBackground:(UIApplication *)application
+{
+#if TARGET_OS_TV
+	application.idleTimerDisabled = NO;
+#else
+	(void)application;
+#endif
+}
+
+- (void)applicationDidBecomeActive:(UIApplication *)application
+{
+#if TARGET_OS_TV
+	application.idleTimerDisabled = YES;
+	[self.window.rootViewController becomeFirstResponder];
+#else
+	(void)application;
+#endif
+	self.displayLink.paused = NO;
 }
 
 - (void)tick:(CADisplayLink *)link
 {
+#if TARGET_OS_TV
+	[(GeaTVController *)self.window.rootViewController pollRemoteMotion];
+#endif
 	(void)link;
-	gea::framework::app::Application::frame(gea_embedded_now_ms());
+	const int nowMs = gea_embedded_now_ms();
+	// This host replaces runtime.cpp's frame loop, including its animation
+	// clock. Prime newly mounted CSS tracks and advance them before rendering.
+	static bool declarativeAnimationsScanned = false;
+	if (!declarativeAnimationsScanned) {
+		declarativeAnimationsScanned = true;
+		gea::css::DeclarativeAnimations::scanAndStart(nowMs);
+	}
+	gea::embedded::ui::StyleSheet::instance().startCssAnimations(static_cast<std::uint32_t>(nowMs));
+	gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(nowMs));
+	gea::framework::app::Application::frame(nowMs);
 	[self syncAppBackgroundColor];
 	auto &tree = gea::embedded::ui::Tree::instance();
 	const int root = tree.mountedRoot();
-	if (!self.nativeRootView && root >= 0) {
-		gea::ios::IosRenderer::instance().sync(self.displayView, root);
-		[self.displayView syncNativeTextInputs];
+	if (!self.nativeRootView) {
+		auto &renderer = gea::ios::IosRenderer::instance();
+		if (root < 0 || gea::framework::display::Underlay::active()) {
+			// Direct-canvas apps and composited underlays present the framework
+			// framebuffer. Remove native views that would cover that image.
+			if (renderer.hasNativeTree()) renderer.teardown();
+		} else {
+			renderer.sync(self.displayView, root);
+			[self.displayView syncNativeTextInputs];
+		}
 		[self.displayView setNeedsDisplay];
 	}
+}
+
+@end
+
+// The one window scene: builds the host on connect and forwards the scene's
+// activity to the app delegate, which keeps the per-app state (display link,
+// idle timer, remote motion). UIKit no longer sends the application-level
+// active/background callbacks once a scene manifest is declared.
+@interface GeaSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property(nonatomic, strong) UIWindow *window;
+@end
+
+@implementation GeaSceneDelegate
+
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options
+{
+	(void)session;
+	(void)options;
+	if (![scene isKindOfClass:UIWindowScene.class]) return;
+	GeaAppDelegate *app = gGeaAppDelegate ?: (GeaAppDelegate *)UIApplication.sharedApplication.delegate;
+	[app startInWindowScene:(UIWindowScene *)scene];
+	self.window = app.window;
+}
+
+- (void)sceneWillResignActive:(UIScene *)scene
+{
+	(void)scene;
+	[gGeaAppDelegate applicationWillResignActive:UIApplication.sharedApplication];
+}
+
+- (void)sceneDidEnterBackground:(UIScene *)scene
+{
+	(void)scene;
+	[gGeaAppDelegate applicationDidEnterBackground:UIApplication.sharedApplication];
+}
+
+- (void)sceneDidBecomeActive:(UIScene *)scene
+{
+	(void)scene;
+	[gGeaAppDelegate applicationDidBecomeActive:UIApplication.sharedApplication];
 }
 
 @end
