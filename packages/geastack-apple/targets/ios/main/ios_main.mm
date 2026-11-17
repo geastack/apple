@@ -879,6 +879,11 @@ static void dispatchRemoteKey(int keyCode)
 	}
 	gea::embedded::ui::StyleSheet::instance().startCssAnimations(static_cast<std::uint32_t>(nowMs));
 	gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(nowMs));
+	// Native views present the tree, so the software framebuffer is never
+	// shown: skip rasterizing it (a 4K canvas costs two full-frame copies).
+	gea::embedded::ui::Tree::instance().setSoftwareRasterSuppressed(
+	    !self.nativeRootView && gea::ios::IosRenderer::instance().hasNativeTree() &&
+	    !gea::framework::display::Underlay::active());
 	gea::framework::app::Application::frame(nowMs);
 	[self syncAppBackgroundColor];
 	auto &tree = gea::embedded::ui::Tree::instance();

@@ -167,7 +167,7 @@ void applyImageProps(UIImageView *imageView, const gea::embedded::ui::Node &node
 void applyCanvasProps(GeaCanvasView *canvasView, int nodeId)
 {
 	canvasView.nodeId = nodeId;
-	[canvasView setNeedsDisplay];
+	[canvasView present];
 }
 
 void applyTypeSpecificProps(UIView *view, const gea::embedded::ui::Node &node, int nodeId, CGFloat scale)

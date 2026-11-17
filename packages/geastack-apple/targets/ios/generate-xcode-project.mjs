@@ -223,6 +223,7 @@ const frameworks = [
   'CoreLocation.framework',
   'CoreMedia.framework',
   'CoreVideo.framework',
+  'IOSurface.framework',
   'ImageIO.framework',
   'MapKit.framework',
   'AVFoundation.framework',
