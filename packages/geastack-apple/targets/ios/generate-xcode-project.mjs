@@ -60,6 +60,13 @@ const appIconAssetsDir = path.join(generatedDir, 'Assets.xcassets')
 // exactly (e.g. SDK 23F81a needs a 23F81a runtime, not a 23F73 one) — a skew that
 // blocks otherwise-fine builds. Skipping it yields an app with the default icon.
 const tvos = process.env.GEA_APPLE_UIKIT_PLATFORM === 'tvos'
+const buildConfig = process.env.GEA_BUILD_CONFIG_JSON
+  ? JSON.parse(fs.readFileSync(process.env.GEA_BUILD_CONFIG_JSON, 'utf8'))
+  : {}
+const viewport = buildConfig.settings?.display || {}
+if ((viewport.width === undefined) !== (viewport.height === undefined))
+  fail('Set both display.width and display.height for the UIKit rendering resolution.')
+
 const skipAppIcon = tvos || process.env.GEA_IOS_SKIP_APP_ICON === '1'
 
 fs.rmSync(projectPath, { recursive: true, force: true })
@@ -222,7 +229,7 @@ const frameworks = [
   'Photos.framework',
   'Security.framework',
   'UserNotifications.framework',
-  'EventKit.framework',
+  ...(!tvos ? ['EventKit.framework'] : []),
   'Metal.framework',
   'MetalKit.framework',
   'Foundation.framework',
@@ -312,6 +319,10 @@ const includePaths = [
 function buildSettings(configuration) {
   const preprocessorDefinitions = [
     'GEA_EMBEDDED_GIF_C_API=1',
+    ...(viewport.width === undefined ? [] : [
+      `GEA_UIKIT_VIEWPORT_WIDTH=${viewport.width}`,
+      `GEA_UIKIT_VIEWPORT_HEIGHT=${viewport.height}`,
+    ]),
     'GEA_EMBEDDED_ENABLE_NATIVE_TEXT_INPUT=1',
     'GEA_EMBEDDED_ENABLE_VIRTUAL_KEYBOARD=0',
     'GEA_CPP_USE_TO_CHARS_DOUBLE=0',

@@ -6,18 +6,9 @@
 
 namespace {
 
-std::uint8_t *g_scratch = nullptr;
-std::size_t g_scratchBytes = 0;
-
-std::uint8_t *ensureScratch(std::size_t bytes)
+void releaseFrame(void *, const void *data, std::size_t)
 {
-	if (g_scratchBytes < bytes) {
-		void *grown = std::realloc(g_scratch, bytes);
-		if (!grown) return nullptr;
-		g_scratch = static_cast<std::uint8_t *>(grown);
-		g_scratchBytes = bytes;
-	}
-	return g_scratch;
+	std::free(const_cast<void *>(data));
 }
 
 }  // namespace
@@ -50,7 +41,7 @@ std::uint8_t *ensureScratch(std::size_t bytes)
 	if (!src || w <= 0 || h <= 0) return;
 
 	const std::size_t bytes = static_cast<std::size_t>(w) * h * 4;
-	std::uint8_t *dst = ensureScratch(bytes);
+	auto *dst = static_cast<std::uint8_t *>(std::malloc(bytes));
 	if (!dst) return;
 #if GEA_EMBEDDED_PIXEL_FORMAT == GEA_PIXEL_RGBA8888
 	// native_t is already RGBA8888 (R,G,B,A bytes per pixel) — exactly the
@@ -68,7 +59,7 @@ std::uint8_t *ensureScratch(std::size_t bytes)
 #endif
 
 	CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-	CGDataProviderRef provider = CGDataProviderCreateWithData(nullptr, dst, bytes, nullptr);
+	CGDataProviderRef provider = CGDataProviderCreateWithData(nullptr, dst, bytes, releaseFrame);
 	const uint32_t bitmapInfo = static_cast<uint32_t>(kCGImageAlphaNoneSkipLast) |
 	                            static_cast<uint32_t>(kCGBitmapByteOrder32Big);
 	CGImageRef image = CGImageCreate(static_cast<std::size_t>(w),

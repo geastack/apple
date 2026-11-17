@@ -718,6 +718,9 @@ static void dispatchRemoteKey(int keyCode)
 
 - (CGSize)viewportSize
 {
+#if defined(GEA_UIKIT_VIEWPORT_WIDTH) && defined(GEA_UIKIT_VIEWPORT_HEIGHT)
+	return CGSizeMake(GEA_UIKIT_VIEWPORT_WIDTH, GEA_UIKIT_VIEWPORT_HEIGHT);
+#endif
 	CGSize size = self.displayView.bounds.size;
 	if (size.width <= 0 || size.height <= 0) size = self.rootView.safeAreaLayoutGuide.layoutFrame.size;
 	if (size.width <= 0 || size.height <= 0) size = self.rootView.bounds.size;
@@ -744,16 +747,40 @@ static void dispatchRemoteKey(int keyCode)
 	self.displayView.backgroundColor = color;
 }
 
+// Apps linked against the iOS/tvOS 27 SDKs must adopt the scene lifecycle:
+// UIKit traps at launch otherwise. The window and everything that hangs off it
+// is built when the scene connects (GeaSceneDelegate), not at launch.
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
 {
 	(void)application;
 	(void)launchOptions;
-	self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-	#if TARGET_OS_TV
+	gGeaAppDelegate = self;
+	return YES;
+}
+
+- (UISceneConfiguration *)application:(UIApplication *)application
+    configurationForConnectingSceneSession:(UISceneSession *)connectingSceneSession
+                                   options:(UISceneConnectionOptions *)options
+{
+	(void)application;
+	(void)options;
+	UISceneConfiguration *configuration = [[UISceneConfiguration alloc] initWithName:@"Default"
+	                                                                     sessionRole:connectingSceneSession.role];
+	configuration.delegateClass = NSClassFromString(@"GeaSceneDelegate");
+	return configuration;
+}
+
+- (void)startInWindowScene:(UIWindowScene *)scene
+{
+	if (self.window) return;
+	UIApplication *application = UIApplication.sharedApplication;
+	self.window = [[UIWindow alloc] initWithWindowScene:scene];
+#if TARGET_OS_TV
 	GeaTVController *controller = [[GeaTVController alloc] init];
 	controller.controllerUserInteractionEnabled = NO;
 	application.idleTimerDisabled = YES;
 #else
+	(void)application;
 	UIViewController *controller = [[UIViewController alloc] init];
 #endif
 	self.rootView = [[UIView alloc] initWithFrame:self.window.bounds];
@@ -804,7 +831,6 @@ static void dispatchRemoteKey(int keyCode)
 		self.displayLink.preferredFramesPerSecond = 60;
 	}
 	[self.displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
-	return YES;
 }
 
 - (void)applicationWillResignActive:(UIApplication *)application
@@ -869,6 +895,46 @@ static void dispatchRemoteKey(int keyCode)
 		}
 		[self.displayView setNeedsDisplay];
 	}
+}
+
+@end
+
+// The one window scene: builds the host on connect and forwards the scene's
+// activity to the app delegate, which keeps the per-app state (display link,
+// idle timer, remote motion). UIKit no longer sends the application-level
+// active/background callbacks once a scene manifest is declared.
+@interface GeaSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@property(nonatomic, strong) UIWindow *window;
+@end
+
+@implementation GeaSceneDelegate
+
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options
+{
+	(void)session;
+	(void)options;
+	if (![scene isKindOfClass:UIWindowScene.class]) return;
+	GeaAppDelegate *app = gGeaAppDelegate ?: (GeaAppDelegate *)UIApplication.sharedApplication.delegate;
+	[app startInWindowScene:(UIWindowScene *)scene];
+	self.window = app.window;
+}
+
+- (void)sceneWillResignActive:(UIScene *)scene
+{
+	(void)scene;
+	[gGeaAppDelegate applicationWillResignActive:UIApplication.sharedApplication];
+}
+
+- (void)sceneDidEnterBackground:(UIScene *)scene
+{
+	(void)scene;
+	[gGeaAppDelegate applicationDidEnterBackground:UIApplication.sharedApplication];
+}
+
+- (void)sceneDidBecomeActive:(UIScene *)scene
+{
+	(void)scene;
+	[gGeaAppDelegate applicationDidBecomeActive:UIApplication.sharedApplication];
 }
 
 @end

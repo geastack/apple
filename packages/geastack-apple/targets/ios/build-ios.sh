@@ -176,6 +176,16 @@ generate_app() {
     --out-dir "$out_dir"
     "${build_font_args[@]}"
   )
+  local plugin_paths
+  local plugin_path
+  plugin_paths="$(node "$GEA_CLI" apps inspect "$app_id" --json | node -e '
+    const app = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    for (const plugin of app.compilerPlugins || [])
+      console.log(require("node:path").resolve(app.root, plugin));
+  ')" || return 1
+  while IFS= read -r plugin_path; do
+    [[ -z "$plugin_path" ]] || args+=(--extra-geatsc-plugin "$plugin_path")
+  done <<< "$plugin_paths"
   local native_plugin="$root/$GEA_APPLE_UIKIT_PLATFORM/geatsc-native-plugin.mjs"
   if [[ -f "$native_plugin" ]]; then
     args+=(--extra-geatsc-plugin "$native_plugin")
