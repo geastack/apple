@@ -166,7 +166,8 @@ const rendererSources = [
   'renderer/view_reconciler.mm',
 ].map((file) => source(path.join(iosDir, 'main', file), 'sourcecode.cpp.objcpp'))
 // gea.targets.<ios|tvos>: per-target native sources, static archives, system
-// frameworks and include directories (validated by the CLI's nativeLink), and
+// frameworks, SDK libraries by name (nativeSystemLibraries, linked as -l<name>)
+// and include directories (validated by the CLI's nativeLink), and
 // resource directories staged into the app bundle (nativeResources).
 const uikitTarget = tvos ? 'tvos' : 'ios'
 const appNativeLink = appMeta.nativeLink?.[uikitTarget] || {}
@@ -378,7 +379,7 @@ function buildSettings(configuration) {
 				${tvos ? 'TVOS_DEPLOYMENT_TARGET = 17.0;' : 'IPHONEOS_DEPLOYMENT_TARGET = 16.0;'}
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				ONLY_ACTIVE_ARCH = ${configuration === 'Debug' ? 'YES' : 'NO'};
-				OTHER_LDFLAGS = (${['$(inherited)', '-Wl,-no_deduplicate', ...(appNativeLink.nativeLibraries || [])].map(q).join(', ')});
+				OTHER_LDFLAGS = (${['$(inherited)', '-Wl,-no_deduplicate', ...(appNativeLink.nativeLibraries || []), ...(appNativeLink.nativeSystemLibraries || []).map((name) => `-l${name}`)].map(q).join(', ')});
 				PRODUCT_BUNDLE_IDENTIFIER = ${q(bundleId)};
 				PRODUCT_NAME = ${q(appName)};
 				SDKROOT = ${tvos ? 'appletvos' : 'iphoneos'};

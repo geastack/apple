@@ -1978,6 +1978,8 @@ APP_LINK_RECORD="$(node -e 'const a=JSON.parse(process.argv[1]);const c=a.native
 APP_NATIVE_LIBRARIES=()
 while IFS= read -r library; do [[ -z "$library" ]] || APP_NATIVE_LIBRARIES+=("$library"); done < <(node -e 'for(const p of JSON.parse(process.argv[1]).nativeLibraries)console.log(p)' "$APP_LINK_RECORD")
 while IFS= read -r framework; do [[ -z "$framework" ]] || LINK_FRAMEWORKS+=(-framework "$framework"); done < <(node -e 'for(const p of JSON.parse(process.argv[1]).frameworks)console.log(p)' "$APP_LINK_RECORD")
+# SDK libraries by name (nativeSystemLibraries: "z" links the SDK's libz).
+while IFS= read -r library; do [[ -z "$library" ]] || LINK_FRAMEWORKS+=("-l$library"); done < <(node -e 'for(const p of JSON.parse(process.argv[1]).nativeSystemLibraries||[])console.log(p)' "$APP_LINK_RECORD")
 
 node "$GEA_CLI" apps sync-native-resources "$APP_ID" --target macos --output "$RES_DIR" > "$BUILD_DIR/native-resources.json"
 if [[ "$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).changed))' "$BUILD_DIR/native-resources.json")" == "true" ]]; then BUNDLE_CONTENT_CHANGED=1; fi
