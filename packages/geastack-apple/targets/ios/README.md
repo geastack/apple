@@ -80,3 +80,17 @@ GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 gea run --target tvos --mode device --app bo
 Use `gea build` with the same options to generate the Xcode project and build
 without launching. Outputs are under the app's `dist/tvos`. The UIKit build
 script shares its signing, device selection, and simulator overrides with iOS.
+
+An app can pin the resolution it renders at, for example 4K on Apple TV, with
+`gea.targets.tvos.build.display` (`gea.targets.ios.build.display` on iOS):
+
+```json
+"tvos": { "build": { "display": { "width": 3840, "height": 2160 } } }
+```
+
+Set both or neither. Per-target native code goes under `gea.targets.<ios|tvos>`:
+`nativeSources`, `nativeLibraries` (static archives), `frameworks` (system
+frameworks), `nativeIncludeDirectories`, `nativeResources` (directories copied
+into the bundle) and `tsconfig` (the TypeScript project the compiler reads).
+Native code can own part of the window as a host extension, a rendering
+surface for example, by registering itself through `main/gea_uikit_host.h`.

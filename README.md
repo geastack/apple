@@ -3,7 +3,7 @@
 Native Apple target support for GeaStack.
 
 This repo contains the packages and target templates that let Gea applications
-run as native Apple apps instead of browser views. The current focus is iOS and
+run as native Apple apps instead of browser views. The current focus is iOS, tvOS and
 macOS application shells, generated Apple SDK bindings, and experimental native
 JSX/SwiftUI helpers.
 
@@ -14,7 +14,7 @@ JSX/SwiftUI helpers.
 | `packages/geastack-apple` | Generated Apple framework type declarations and runtime module stubs for Foundation, UIKit, AppKit, Metal, MapKit, AVFoundation, and related SDKs. |
 | `packages/geajs-apple-swiftui` | Optional JSX-to-SwiftUI source helpers for Apple-native experiments. |
 | `packages/geatsc-plugin-apple-native` | `geatsc` plugin metadata for Apple-native bindings. |
-| `packages/geastack-apple/targets/ios` | UIKit target template, Xcode project generator, simulator/device build script, and iOS tests. |
+| `packages/geastack-apple/targets/ios` | UIKit target template (iOS and tvOS), Xcode project generator, simulator/device build script, and iOS tests. |
 | `packages/geastack-apple/targets/macos` | Cocoa/AppKit target template, generated resident-app registry, and macOS build script. |
 
 ## Quick Start
@@ -25,6 +25,7 @@ where npm installed this package. From an app that depends on `@geastack/apple`:
 ```sh
 npx gea build --target ios            # or: node_modules/@geastack/apple/targets/ios/build-ios.sh <app-id> simulator
 npx gea run --target ios              # build, then install and launch on an iPhone simulator
+npx gea run --target tvos             # the same UIKit host on an Apple TV simulator
 ```
 
 Build a signed device app:
@@ -49,9 +50,9 @@ npm run typecheck
 
 ## Dependencies
 
-- Xcode with iOS and macOS SDKs.
+- Xcode with the iOS, tvOS and macOS SDKs (whichever you target).
 - Xcode command line tools.
-- An installed iOS Simulator runtime for simulator runs.
+- An installed iOS or tvOS Simulator runtime for simulator runs.
 - A configured Apple development team for signed device runs.
 - The rest of the stack comes from npm: an app that depends on
   `@geastack/apple` gets `@geastack/core`, `@geastack/compiler` and the other
@@ -60,7 +61,7 @@ npm run typecheck
 ## Documentation
 
 - [packages/geastack-apple/targets/ios/README.md](packages/geastack-apple/targets/ios/README.md):
-  iOS simulator and device build details.
+  iOS and tvOS simulator and device build details.
 - [packages/geastack-apple/targets/macos/README.md](packages/geastack-apple/targets/macos/README.md):
   macOS renderer and target architecture.
 

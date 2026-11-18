@@ -1,7 +1,7 @@
 # @geastack/apple
 
 Apple platform support for GeaStack: generated TypeScript bindings for the
-Apple SDKs, and the macOS and iOS native build targets that turn a compiled Gea
+Apple SDKs, and the macOS, iOS and tvOS native build targets that turn a compiled Gea
 app into an `.app`.
 
 ```sh
@@ -15,6 +15,7 @@ The `gea` CLI drives the targets:
 ```sh
 gea build --target macos
 gea build --target ios
+gea build --target tvos
 ```
 
 The target build scripts can also be run directly from an app directory that
@@ -24,9 +25,10 @@ has the GeaStack packages installed:
 node_modules/@geastack/apple/targets/macos/build-macos.sh my-app
 node_modules/@geastack/apple/targets/ios/build-ios.sh my-app simulator
 GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 node_modules/@geastack/apple/targets/ios/build-ios.sh my-app device
+node_modules/@geastack/apple/targets/ios/build-ios.sh my-app simulator tvos
 ```
 
-Requires Xcode with the macOS and iOS SDKs. Each target directory has its own
+Requires Xcode with the macOS, iOS and tvOS SDKs you target. Each target directory has its own
 README covering the renderer and project layout.
 
 ## Using Apple frameworks from TypeScript
