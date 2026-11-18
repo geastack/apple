@@ -348,6 +348,8 @@ static bool geaOwnsContourPress(int x, int y) {
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) GeaContentView *rootView;
 @property(nonatomic, strong) NSTimer *frameTimer;
+// window.json `vsync: false`: frames run uncapped instead of at the display's cadence.
+@property(nonatomic) BOOL vsyncDisabled;
 @property(nonatomic, strong) CADisplayLink *frameDisplayLink API_AVAILABLE(macos(14.0));
 @property(nonatomic, strong) GeaSplitShell *splitShell;
 @property(nonatomic, strong) id geaToolbarDelegate; // NSToolbar.delegate is weak; retain it here
@@ -473,6 +475,7 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	BOOL fullSizeContentView = NO;
 	BOOL transparentTitleBar = NO;
 	BOOL titleHidden = NO;
+	BOOL startFullscreen = NO;
 	NSString *appearanceName = nil;
 
 	NSString *cfgPath = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"window.json"];
@@ -494,6 +497,8 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 			if ([tv isKindOfClass:[NSString class]] && [(NSString *)tv isEqualToString:@"hidden"]) titleHidden = YES;
 			id ap = win[@"appearance"];
 			if ([ap isKindOfClass:[NSString class]]) appearanceName = ap;
+			id vs = win[@"vsync"];      if ([vs respondsToSelector:@selector(boolValue)]) self.vsyncDisabled = ![vs boolValue];
+			id fs = win[@"fullscreen"]; if ([fs respondsToSelector:@selector(boolValue)]) startFullscreen = [fs boolValue];
 		}
 	}
 
@@ -546,10 +551,10 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 
 	[self tick];
 	[self startFrameTimer];
-	// GEA_MACOS_FULLSCREEN=1 starts fullscreen. With GEA_MACOS_VSYNC=0 this is
+	// window.json `fullscreen: true` starts fullscreen. With `vsync: false` it is
 	// the uncapped arm: a windowed CAMetalLayer gets drawables back only as the
 	// compositor runs, a fullscreen one presents directly.
-	if (const char *fullscreen = std::getenv("GEA_MACOS_FULLSCREEN"); fullscreen && std::strcmp(fullscreen, "1") == 0) {
+	if (startFullscreen) {
 		self.window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
 		NSWindow *window = self.window;
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{
@@ -565,10 +570,9 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 #endif
 	if (self.frameTimer) return;
 	const BOOL thermalrightTarget = gea::macos::thermalright::enabled();
-	// GEA_MACOS_VSYNC=0 drops the display-link cadence for the fast timer, so a
-	// renderer presenting with swap interval 0 runs uncapped (benchmarking).
-	const char *vsync = std::getenv("GEA_MACOS_VSYNC");
-	const BOOL uncapped = vsync && std::strcmp(vsync, "0") == 0;
+	// window.json `vsync: false` drops the display-link cadence for the fast
+	// timer, so a renderer presenting with swap interval 0 runs uncapped.
+	const BOOL uncapped = self.vsyncDisabled;
 	if (!thermalrightTarget && !uncapped) {
 		if (@available(macOS 14.0, *)) {
 			if (self.frameDisplayLink) return;

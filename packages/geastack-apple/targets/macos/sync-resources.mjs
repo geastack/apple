@@ -2,6 +2,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { windowConfigText } from './window-config.mjs'
 
 const args = process.argv.slice(2)
 
@@ -160,9 +161,15 @@ const windowConfig = path.join(resourcesDir, 'window.json')
 for (const entry of fs.readdirSync(resourcesDir, { withFileTypes: true })) {
   if (entry.isFile() && /^window\.json\.tmp\.\d+$/.test(entry.name)) removeFile(path.join(resourcesDir, entry.name))
 }
-const configSource = configDir ? path.join(configDir, 'macos.json') : ''
-if (configSource && fs.existsSync(configSource)) syncFile(configSource, windowConfig)
-else removeFile(windowConfig)
+const windowText = windowConfigText(configDir)
+if (windowText) {
+  if (!fs.existsSync(windowConfig) || fs.readFileSync(windowConfig, 'utf8') !== windowText) {
+    const temporary = `${windowConfig}.tmp.${process.pid}`
+    fs.writeFileSync(temporary, windowText)
+    fs.renameSync(temporary, windowConfig)
+    changed = true
+  }
+} else removeFile(windowConfig)
 
 const manifest = `${JSON.stringify({ fonts: [...desiredFonts.keys()].sort(), fontLicenses: [...desiredFontLicenses.keys()].sort() }, null, 2)}\n`
 fs.mkdirSync(path.dirname(manifestPath), { recursive: true })
