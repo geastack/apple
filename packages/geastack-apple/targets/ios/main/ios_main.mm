@@ -17,6 +17,7 @@
 #include "event.h"
 #include "events.h"
 #include "font_registry.h"
+#include "gea_uikit_host.h"
 #include "image.h"
 #include "ios_renderer.h"
 #include "ios_root_background.h"
@@ -678,6 +679,9 @@ static void dispatchRemoteKey(int keyCode)
 @property(nonatomic, strong) GeaDisplayView *displayView;
 @property(nonatomic, strong) UIView *nativeRootView;
 @property(nonatomic, strong) CADisplayLink *displayLink;
+// The root view's size (height times scale, so a scale change shows) last
+// reported to the host extensions.
+@property(nonatomic, assign) CGSize extensionLayout;
 - (void)installNativeRootView:(UIView *)view;
 @end
 
@@ -820,7 +824,15 @@ static void dispatchRemoteKey(int keyCode)
 	// On iOS the build sets GEA_EMBEDDED_PIXEL_FORMAT=GEA_PIXEL_RGBA8888, so the
 	// ImageStore decodes straight to full-colour RGBA8888 native pixels (no 565
 	// quantization, no separate retained buffer) for native UIImageView.
+	// Host extensions (a package's GL or GPU surface) take their part of the
+	// window before the program's top level runs: the program creates its
+	// context while it initializes, inside the extensions' frame bracket.
+	const CGSize rootSize = self.rootView.bounds.size;
+	self.extensionLayout = CGSizeMake(rootSize.width, rootSize.height * viewportScale);
+	gea_uikit_host_attach((__bridge void *)self.rootView, rootSize.width, rootSize.height, viewportScale);
+	const bool extensionsBegun = gea_uikit_host_begin_frame() != 0;
 	gea::framework::app::Application::init(viewportWidth, viewportHeight, devicePixelRatio);
+	if (extensionsBegun) gea_uikit_host_end_frame();
 	[self syncAppBackgroundColor];
 	[self tick:nil];
 
@@ -879,7 +891,25 @@ static void dispatchRemoteKey(int keyCode)
 	}
 	gea::embedded::ui::StyleSheet::instance().startCssAnimations(static_cast<std::uint32_t>(nowMs));
 	gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(nowMs));
-	gea::framework::app::Application::frame(nowMs);
+	// Native views present the tree, so the software framebuffer is never
+	// shown: skip rasterizing it (a 4K canvas costs two full-frame copies).
+	gea::embedded::ui::Tree::instance().setSoftwareRasterSuppressed(
+	    !self.nativeRootView && gea::ios::IosRenderer::instance().hasNativeTree() &&
+	    !gea::framework::display::Underlay::active());
+	if (gea_uikit_host_has_extensions()) {
+		const CGSize rootSize = self.rootView.bounds.size;
+		const CGFloat scale = [self viewportScale];
+		const CGSize layout = CGSizeMake(rootSize.width, rootSize.height * scale);
+		if (!CGSizeEqualToSize(layout, self.extensionLayout)) {
+			self.extensionLayout = layout;
+			gea_uikit_host_layout(rootSize.width, rootSize.height, scale);
+		}
+		if (!gea_uikit_host_begin_frame()) return;
+		gea::framework::app::Application::frame(nowMs);
+		gea_uikit_host_end_frame();
+	} else {
+		gea::framework::app::Application::frame(nowMs);
+	}
 	[self syncAppBackgroundColor];
 	auto &tree = gea::embedded::ui::Tree::instance();
 	const int root = tree.mountedRoot();

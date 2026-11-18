@@ -79,6 +79,18 @@ UIFont *fontForFamily(NSString *family, CGFloat size)
 
 }  // namespace
 
+void ensureFontsRegistered() { ensureBundledFontsRegistered(); }
+
+// Whether UIKit has a face of `family` itself, not the system fallback CoreText
+// substitutes for a family it does not know.
+bool fontResolvesFamily(NSString *family, CGFloat size)
+{
+	UIFont *font = fontForFamily(family, size > 0 ? size : 16);
+	if (!font) return false;
+	return [font.familyName caseInsensitiveCompare:family] == NSOrderedSame ||
+	       [font.fontName caseInsensitiveCompare:family] == NSOrderedSame;
+}
+
 UIFont *fontForId(int fontId, CGFloat sizePt)
 {
 #if TARGET_OS_TV
@@ -111,6 +123,20 @@ extern "C" bool gea_host_measure_text(const char *text,
 	}
 
 	@autoreleasepool {
+		const char *familyName = gea::framework::graphics::FontRegistry::familyName(fontId);
+		NSString *family = familyName && familyName[0] ? [NSString stringWithUTF8String:familyName] : nil;
+#ifdef GEA_EMBEDDED_HAS_GENERATED_FONTS
+		// A family UIKit cannot resolve (a CSS alias such as "Outfit M", baked
+		// into the binary with no font file in the bundle) would be measured in
+		// the system fallback face, while the engine draws it with its baked
+		// glyphs: the box comes out narrower than the text and clips it. Leave
+		// those to the engine, which measures the face it draws.
+		gea::ios::ensureFontsRegistered();
+		if (family && !gea::ios::fontResolvesFamily(family, fontSize) &&
+		    gea::framework::graphics::FontRegistry::rasterizedFamily(fontId, fontSize).valid()) {
+			return false;
+		}
+#endif
 		UIFont *font = gea::ios::fontForId(fontId, fontSize);
 		if (!font) return false;
 

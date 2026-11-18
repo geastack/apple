@@ -186,7 +186,31 @@ generate_app() {
   while IFS= read -r plugin_path; do
     [[ -z "$plugin_path" ]] || args+=(--extra-geatsc-plugin "$plugin_path")
   done <<< "$plugin_paths"
+  # gea.targets.<ios|tvos>.tsconfig: the TypeScript project the compiler reads
+  # the program under, as build-windows.mjs passes it. Without it the compiler
+  # takes the project nearest the staged entry, and an app that maps modules
+  # through `paths` (a three.js app's barrel) is read with those modules untyped.
+  local project
+  project="$(node "$GEA_CLI" apps inspect "$app_id" --json | node -e '
+    const app = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+    const tsconfig = app.targetConfig?.[process.argv[1]]?.tsconfig;
+    if (tsconfig) console.log(require("node:path").resolve(app.root, tsconfig));
+  ' "$GEA_APPLE_UIKIT_PLATFORM")" || return 1
+  [[ -z "$project" ]] || args+=(--project "$project")
+  # The compiler plugins this app's packages ship, resolved by `gea build`
+  # (src/macos/adapter.mjs) exactly as for macOS -- a three.js app's WebGL
+  # lowering arrives this way.
+  if [[ -n "${GEA_EXTRA_GEATSC_PLUGINS:-}" ]]; then
+    while IFS= read -r plugin_path; do
+      [[ -z "$plugin_path" ]] || args+=(--extra-geatsc-plugin "$plugin_path")
+    done <<< "${GEA_EXTRA_GEATSC_PLUGINS//:/$'\n'}"
+  fi
+  # <app>/<ios|tvos>/geatsc-native-plugin.mjs, or the app's own root when the
+  # app already is that folder (an app kept under a tvos/ directory).
   local native_plugin="$root/$GEA_APPLE_UIKIT_PLATFORM/geatsc-native-plugin.mjs"
+  if [[ ! -f "$native_plugin" && "$(basename "$root")" == "$GEA_APPLE_UIKIT_PLATFORM" ]]; then
+    native_plugin="$root/geatsc-native-plugin.mjs"
+  fi
   if [[ -f "$native_plugin" ]]; then
     args+=(--extra-geatsc-plugin "$native_plugin")
   fi

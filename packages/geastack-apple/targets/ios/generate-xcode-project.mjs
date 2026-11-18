@@ -165,15 +165,22 @@ const rendererSources = [
   'renderer/native_scroll_container.mm',
   'renderer/view_reconciler.mm',
 ].map((file) => source(path.join(iosDir, 'main', file), 'sourcecode.cpp.objcpp'))
+// gea.targets.<ios|tvos>: per-target native sources, static archives, system
+// frameworks and include directories (validated by the CLI's nativeLink), and
+// resource directories staged into the app bundle (nativeResources).
+const uikitTarget = tvos ? 'tvos' : 'ios'
+const appNativeLink = appMeta.nativeLink?.[uikitTarget] || {}
 const appNativeSources = [...new Map([
   ...findAppNativeSources(),
   ...(appMeta.nativeSourcePaths || []).map((file) => source(file, nativeSourceKind(file))),
+  ...(appMeta.targetNativeSourcePaths?.[uikitTarget] || []).map((file) => source(file, nativeSourceKind(file))),
 ].map((entry) => [entry.file, entry])).values()]
 const sources = [
   source(path.join(iosDir, 'main/ios_main.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_root_background.cpp')),
   ...rendererSources,
   source(path.join(iosDir, 'main/canvas_view.mm'), 'sourcecode.cpp.objcpp'),
+  source(path.join(iosDir, 'main/uikit_host.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/color_convert.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/image_bridge.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/font_registry.mm'), 'sourcecode.cpp.objcpp'),
@@ -208,6 +215,12 @@ if (existing(assetsGenerated)) sources.push(assetsGenerated)
 const hasGeneratedFonts = sources.some((entry) => path.basename(entry.file) === 'gea_embedded_font_generated.cpp')
 
 const fontResources = findFontResources().map((file) => resource(file))
+// Each nativeResources destination becomes a folder of the same name in the
+// bundle: stage them under the generated directory, then reference the folders.
+const nativeResourceDir = path.join(generatedDir, 'native-resources')
+const nativeResourceNames = Object.keys(appMeta.nativeResources?.[uikitTarget] || {})
+if (nativeResourceNames.length) gea(['apps', 'sync-native-resources', appId, '--target', uikitTarget, '--output', nativeResourceDir])
+const folderResources = nativeResourceNames.map((name) => resource(path.join(nativeResourceDir, name), 'folder'))
 const appIconAssets = resource(appIconAssetsDir, 'folder.assetcatalog')
 const appIconResources = skipAppIcon ? [] : [appIconAssets]
 const uiTestSource = source(path.join(iosDir, 'test/GeaIosRubberBandUITests.swift'), 'sourcecode.swift')
@@ -223,6 +236,7 @@ const frameworks = [
   'CoreLocation.framework',
   'CoreMedia.framework',
   'CoreVideo.framework',
+  'IOSurface.framework',
   'ImageIO.framework',
   'MapKit.framework',
   'AVFoundation.framework',
@@ -234,6 +248,9 @@ const frameworks = [
   'MetalKit.framework',
   'Foundation.framework',
 ]
+for (const name of appNativeLink.frameworks || []) {
+  if (!frameworks.includes(`${name}.framework`)) frameworks.push(`${name}.framework`)
+}
 
 const productId = id('product')
 const targetId = id('target')
@@ -277,6 +294,12 @@ for (const r of fontResources) {
   buildFiles.push(`${id(`build:${label}`)} /* ${path.basename(r.file)} in Resources */ = {isa = PBXBuildFile; fileRef = ${id(`file:${label}`)} /* ${path.basename(r.file)} */; };`)
 }
 
+for (const r of folderResources) {
+  const label = rel(r.file)
+  fileRefs.push(`${id(`file:${label}`)} /* ${path.basename(r.file)} */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ${q(r.file)}; sourceTree = "<absolute>"; };`)
+  buildFiles.push(`${id(`build:${label}`)} /* ${path.basename(r.file)} in Resources */ = {isa = PBXBuildFile; fileRef = ${id(`file:${label}`)} /* ${path.basename(r.file)} */; };`)
+}
+
 for (const a of appIconResources) {
   const label = rel(a.file)
   fileRefs.push(`${id(`file:${label}`)} /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = ${a.kind}; path = ${q(a.file)}; sourceTree = "<absolute>"; };`)
@@ -307,6 +330,7 @@ const includePaths = [
   generatedDir,
   path.join(appRoot, tvos ? 'tvos' : 'ios'),
   ...new Set(appNativeSources.map(({ file }) => path.dirname(file))),
+  ...(appNativeLink.nativeIncludeDirectories || []),
   // Framework include roots (core/host/engine includes + vendor/stb + AnimatedGIF)
   // from the shared manifest gea_sources.sh, passed by build-ios.sh via env.
   ...(process.env.GEA_FW_INCLUDE_DIRS || '').split('\n').filter(Boolean),
@@ -334,6 +358,8 @@ function buildSettings(configuration) {
     // native pixel with no runtime format branch and no colour conversion.
     'GEA_EMBEDDED_PIXEL_FORMAT=1',
     ...(hasGeneratedFonts ? ['GEA_EMBEDDED_HAS_GENERATED_FONTS=1'] : []),
+    // gea.defines and the resolved build settings' macros.
+    ...(buildConfig.defines || []),
   ]
   return `{
 				ALWAYS_SEARCH_USER_PATHS = NO;${skipAppIcon ? '' : `
@@ -352,7 +378,7 @@ function buildSettings(configuration) {
 				${tvos ? 'TVOS_DEPLOYMENT_TARGET = 17.0;' : 'IPHONEOS_DEPLOYMENT_TARGET = 16.0;'}
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				ONLY_ACTIVE_ARCH = ${configuration === 'Debug' ? 'YES' : 'NO'};
-				OTHER_LDFLAGS = ("$(inherited)", "-Wl,-no_deduplicate");
+				OTHER_LDFLAGS = (${['$(inherited)', '-Wl,-no_deduplicate', ...(appNativeLink.nativeLibraries || [])].map(q).join(', ')});
 				PRODUCT_BUNDLE_IDENTIFIER = ${q(bundleId)};
 				PRODUCT_NAME = ${q(appName)};
 				SDKROOT = ${tvos ? 'appletvos' : 'iphoneos'};
@@ -387,6 +413,7 @@ const sourceChildren = sources.map((s) => `${id(`file:${rel(s.file)}`)} /* ${pat
 const uiTestSourceChildren = uiTestSources.map((s) => `${id(`file:${rel(s.file)}`)} /* ${path.basename(s.file)} */`)
 const resourceChildren = [
   ...fontResources.map((r) => `${id(`file:${rel(r.file)}`)} /* ${path.basename(r.file)} */`),
+  ...folderResources.map((r) => `${id(`file:${rel(r.file)}`)} /* ${path.basename(r.file)} */`),
   ...appIconResources.map((a) => `${id(`file:${rel(a.file)}`)} /* Assets.xcassets */`),
 ]
 const frameworkChildren = frameworks.map((fw) => `${id(`file:${fw}`)} /* ${fw} */`)
@@ -402,6 +429,7 @@ const sourceBuildRefs = sources.map((s) => `${id(`build:${rel(s.file)}`)} /* ${p
 const uiTestSourceBuildRefs = uiTestSources.map((s) => `${id(`build:${rel(s.file)}`)} /* ${path.basename(s.file)} in Sources */`)
 const resourceBuildRefs = [
   ...fontResources.map((r) => `${id(`build:${rel(r.file)}`)} /* ${path.basename(r.file)} in Resources */`),
+  ...folderResources.map((r) => `${id(`build:${rel(r.file)}`)} /* ${path.basename(r.file)} in Resources */`),
   ...appIconResources.map((a) => `${id(`build:${rel(a.file)}`)} /* Assets.xcassets in Resources */`),
 ]
 const frameworkBuildRefs = frameworks.map((fw) => `${id(`build:${fw}`)} /* ${fw} in Frameworks */`)
