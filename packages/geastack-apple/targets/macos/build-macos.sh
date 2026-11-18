@@ -2115,12 +2115,12 @@ done
 
 # Per-app window config — the macOS main reads window.json out of Resources/
 # at launch to pick up size, transparent title bar, dark appearance, etc.
-# Source path is apps/<id>/macos.json so the file lives next to the JSX
-# it configures; we copy it as window.json so the runtime path is stable
+# Source is apps/<id>/macos.json overlaid with gea.targets.macos.window from
+# the app's package.json (window-config.mjs), written as window.json so the runtime path is stable
 # regardless of which app id produced it.
 APP_DIR_FOR_CONFIG="$(resolve_app_dir "$APP_ID")"
-if [[ -n "$APP_DIR_FOR_CONFIG" && -f "$APP_DIR_FOR_CONFIG/macos.json" ]]; then
-  cp "$APP_DIR_FOR_CONFIG/macos.json" "$RES_DIR/window.json"
+if [[ -n "$APP_DIR_FOR_CONFIG" ]]; then
+  node "$ROOT_DIR/targets/macos/window-config.mjs" "$APP_DIR_FOR_CONFIG" "$RES_DIR/window.json"
 fi
 else
   APP_DIRS_FOR_FONTS=()
