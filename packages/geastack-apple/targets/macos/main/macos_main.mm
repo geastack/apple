@@ -64,6 +64,7 @@ namespace gea::macos { void installWifiDriver(); int nodeIdForView(NSView *view)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "gea_appkit_host.h"
 
 extern "C" int gea_embedded_now_ms(void);
 // Headless text-input driver used by GEA_MACOS_SYNTH_INPUT (press_bridge.mm).
@@ -534,6 +535,10 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	if (gea::macos::thermalright::enabled()) {
 		size = NSMakeSize(gea::platform::display::kWidth, gea::platform::display::kHeight);
 	}
+	// Host extensions (a package's rendering surface) attach before the
+	// program's top level runs, as on iOS and tvOS.
+	gea_appkit_host_attach((__bridge void *)self.rootView, size.width, size.height,
+	                       self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1.0);
 	gea_macos_smoke_log("[gea-macos] before Application::init");
 	gea::framework::app::Application::init(static_cast<int>(size.width), static_cast<int>(size.height));
 	gea_macos_smoke_log("[gea-macos] after Application::init");
