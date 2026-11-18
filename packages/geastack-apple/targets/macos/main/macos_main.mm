@@ -546,6 +546,16 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 
 	[self tick];
 	[self startFrameTimer];
+	// GEA_MACOS_FULLSCREEN=1 starts fullscreen. With GEA_MACOS_VSYNC=0 this is
+	// the uncapped arm: a windowed CAMetalLayer gets drawables back only as the
+	// compositor runs, a fullscreen one presents directly.
+	if (const char *fullscreen = std::getenv("GEA_MACOS_FULLSCREEN"); fullscreen && std::strcmp(fullscreen, "1") == 0) {
+		self.window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+		NSWindow *window = self.window;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{
+			if (!(window.styleMask & NSWindowStyleMaskFullScreen)) [window toggleFullScreen:nil];
+		});
+	}
 }
 
 - (void)startFrameTimer
@@ -555,7 +565,11 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 #endif
 	if (self.frameTimer) return;
 	const BOOL thermalrightTarget = gea::macos::thermalright::enabled();
-	if (!thermalrightTarget) {
+	// GEA_MACOS_VSYNC=0 drops the display-link cadence for the fast timer, so a
+	// renderer presenting with swap interval 0 runs uncapped (benchmarking).
+	const char *vsync = std::getenv("GEA_MACOS_VSYNC");
+	const BOOL uncapped = vsync && std::strcmp(vsync, "0") == 0;
+	if (!thermalrightTarget && !uncapped) {
 		if (@available(macOS 14.0, *)) {
 			if (self.frameDisplayLink) return;
 			// A timer cannot express the desired display refresh rate. The
@@ -581,7 +595,16 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	                                          repeats:YES
 	                                            block:^(NSTimer *t) {
 		(void)t;
-		[weakSelf tick];
+		if (!uncapped) {
+			[weakSelf tick];
+			return;
+		}
+		// The run loop fires even a 1/960 s timer only ~120 times a second, so
+		// uncapped, each fire runs frames back to back for up to ~6 ms and then
+		// returns so input and window events are still serviced.
+		const auto burstEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(6);
+		do [weakSelf tick];
+		while (std::chrono::steady_clock::now() < burstEnd);
 	}];
 	self.frameTimer.tolerance = thermalrightTarget ? 0.001 : 0.0;
 	[[NSRunLoop currentRunLoop] addTimer:self.frameTimer forMode:NSRunLoopCommonModes];
