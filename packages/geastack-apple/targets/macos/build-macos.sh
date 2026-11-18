@@ -1074,6 +1074,7 @@ MM_SOURCES=(
   # gea::platform::audio — the AVAudioEngine backend, shared verbatim with iOS.
   "$ROOT_DIR/targets/shared/apple_audio.mm"
   "$ROOT_DIR/targets/macos/main/macos_main.mm"
+  "$ROOT_DIR/targets/macos/main/appkit_host.mm"
   "$ROOT_DIR/targets/macos/main/macos_native_shell.mm"
   "$ROOT_DIR/targets/macos/main/macos_display.mm"
   "$ROOT_DIR/targets/macos/main/macos_timers.mm"
