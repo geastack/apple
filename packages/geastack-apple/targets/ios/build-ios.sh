@@ -324,7 +324,8 @@ GEA_CLI_BIN="$GEA_CLI" node "$IOS_DIR/generate-xcode-project.mjs" \
   --app-name "$APP_NAME" \
   --bundle-id "$BUNDLE_ID" \
   --generated-dir "$GENERATED_DIR" \
-  --project-path "$PROJECT_PATH"
+  --project-path "$PROJECT_PATH" \
+  --destination "$DESTINATION"
 
 SDK="$SIMULATOR_SDK"
 SIMULATOR_DEVICE_ID="${GEA_IOS_SIMULATOR_UDID:-}"

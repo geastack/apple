@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url'
 
 import { execFileSync } from 'node:child_process'
 
+import { readUikitNativePackages } from './native-packages.mjs'
+
 // The project is the directory this ran in -- the one being compiled, which is
 // also what the CLI resolves from cwd. iOS target sources live next to this
 // script, not in the project. App metadata and icon generation come from the
@@ -171,10 +173,25 @@ const rendererSources = [
 // resource directories staged into the app bundle (nativeResources).
 const uikitTarget = tvos ? 'tvos' : 'ios'
 const appNativeLink = appMeta.nativeLink?.[uikitTarget] || {}
+// Native code the packages the program uses declare in their own gea-native.json
+// (native-packages.mjs): their sources, frameworks, libraries and defines, and
+// any static library they build once on this Mac (ANGLE for WebGL on tvOS).
+let nativePackages
+try {
+  nativePackages = readUikitNativePackages({
+    appRoot,
+    moduleGraphPath: path.join(generatedDir, 'module-graph', 'gea-module-graph.json'),
+    target: uikitTarget,
+    simulator: (opt('--destination') || 'simulator') === 'simulator',
+  })
+} catch (error) {
+  fail(`native packages: ${error.message}`)
+}
 const appNativeSources = [...new Map([
   ...findAppNativeSources(),
   ...(appMeta.nativeSourcePaths || []).map((file) => source(file, nativeSourceKind(file))),
   ...(appMeta.targetNativeSourcePaths?.[uikitTarget] || []).map((file) => source(file, nativeSourceKind(file))),
+  ...nativePackages.sources.map((file) => source(file, nativeSourceKind(file))),
 ].map((entry) => [entry.file, entry])).values()]
 const sources = [
   source(path.join(iosDir, 'main/ios_main.mm'), 'sourcecode.cpp.objcpp'),
@@ -215,7 +232,8 @@ const assetsGenerated = source(path.join(generatedDir, 'gea_embedded_assets_gene
 if (existing(assetsGenerated)) sources.push(assetsGenerated)
 const hasGeneratedFonts = sources.some((entry) => path.basename(entry.file) === 'gea_embedded_font_generated.cpp')
 
-const fontResources = findFontResources().map((file) => resource(file))
+// Plain files copied into the bundle: fonts, and the packages' resources (license notices).
+const fontResources = [...findFontResources(), ...nativePackages.resources].map((file) => resource(file))
 // Each nativeResources destination becomes a folder of the same name in the
 // bundle: stage them under the generated directory, then reference the folders.
 const nativeResourceDir = path.join(generatedDir, 'native-resources')
@@ -249,7 +267,7 @@ const frameworks = [
   'MetalKit.framework',
   'Foundation.framework',
 ]
-for (const name of appNativeLink.frameworks || []) {
+for (const name of [...(appNativeLink.frameworks || []), ...nativePackages.frameworks]) {
   if (!frameworks.includes(`${name}.framework`)) frameworks.push(`${name}.framework`)
 }
 
@@ -332,6 +350,7 @@ const includePaths = [
   path.join(appRoot, tvos ? 'tvos' : 'ios'),
   ...new Set(appNativeSources.map(({ file }) => path.dirname(file))),
   ...(appNativeLink.nativeIncludeDirectories || []),
+  ...nativePackages.includeDirs,
   // Framework include roots (core/host/engine includes + vendor/stb + AnimatedGIF)
   // from the shared manifest gea_sources.sh, passed by build-ios.sh via env.
   ...(process.env.GEA_FW_INCLUDE_DIRS || '').split('\n').filter(Boolean),
@@ -361,6 +380,7 @@ function buildSettings(configuration) {
     ...(hasGeneratedFonts ? ['GEA_EMBEDDED_HAS_GENERATED_FONTS=1'] : []),
     // gea.defines and the resolved build settings' macros.
     ...(buildConfig.defines || []),
+    ...nativePackages.defines,
   ]
   return `{
 				ALWAYS_SEARCH_USER_PATHS = NO;${skipAppIcon ? '' : `
@@ -379,7 +399,7 @@ function buildSettings(configuration) {
 				${tvos ? 'TVOS_DEPLOYMENT_TARGET = 17.0;' : 'IPHONEOS_DEPLOYMENT_TARGET = 16.0;'}
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				ONLY_ACTIVE_ARCH = ${configuration === 'Debug' ? 'YES' : 'NO'};
-				OTHER_LDFLAGS = (${['$(inherited)', '-Wl,-no_deduplicate', ...(appNativeLink.nativeLibraries || []), ...(appNativeLink.nativeSystemLibraries || []).map((name) => `-l${name}`)].map(q).join(', ')});
+				OTHER_LDFLAGS = (${['$(inherited)', '-Wl,-no_deduplicate', ...(appNativeLink.nativeLibraries || []), ...nativePackages.libraries, ...[...(appNativeLink.nativeSystemLibraries || []), ...nativePackages.systemLibraries].map((name) => `-l${name}`)].map(q).join(', ')});
 				PRODUCT_BUNDLE_IDENTIFIER = ${q(bundleId)};
 				PRODUCT_NAME = ${q(appName)};
 				SDKROOT = ${tvos ? 'appletvos' : 'iphoneos'};
