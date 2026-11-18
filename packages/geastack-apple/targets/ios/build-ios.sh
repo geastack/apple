@@ -205,7 +205,12 @@ generate_app() {
       [[ -z "$plugin_path" ]] || args+=(--extra-geatsc-plugin "$plugin_path")
     done <<< "${GEA_EXTRA_GEATSC_PLUGINS//:/$'\n'}"
   fi
+  # <app>/<ios|tvos>/geatsc-native-plugin.mjs, or the app's own root when the
+  # app already is that folder (an app kept under a tvos/ directory).
   local native_plugin="$root/$GEA_APPLE_UIKIT_PLATFORM/geatsc-native-plugin.mjs"
+  if [[ ! -f "$native_plugin" && "$(basename "$root")" == "$GEA_APPLE_UIKIT_PLATFORM" ]]; then
+    native_plugin="$root/geatsc-native-plugin.mjs"
+  fi
   if [[ -f "$native_plugin" ]]; then
     args+=(--extra-geatsc-plugin "$native_plugin")
   fi
