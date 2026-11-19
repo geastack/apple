@@ -590,6 +590,18 @@ generate_app() {
     done
     (( alreadySelected != 0 )) || extraArgs+=(--extra-geatsc-plugin "$declaredPluginPath")
   done < <(node -e 'for(const p of JSON.parse(process.argv[1]).paths)console.log(p)' "$declaredAppPlugins")
+  # gea.targets.macos.tsconfig: the TypeScript project the compiler reads the
+  # program under, as build-ios.sh passes it. Without it the compiler takes the
+  # project nearest the staged entry, and an app that maps modules through
+  # `paths` (a three.js app's barrel) is read with those modules untyped -- an
+  # analysis that outgrows the compiler's heap.
+  local declaredProject
+  declaredProject="$(node -e '
+    const app = JSON.parse(process.argv[1]);
+    const tsconfig = app.targetConfig?.macos?.tsconfig;
+    if (tsconfig) console.log(require("node:path").resolve(app.root, tsconfig));
+  ' "$declaredAppMetadata")" || return 1
+  [[ -z "$declaredProject" ]] || extraArgs+=(--project "$declaredProject")
   if [[ "$appRuntime" == "apple-native" ]]; then
     extraArgs+=(--apple-native)
   fi
@@ -2196,6 +2208,31 @@ if [[ "$APP_ID" == "gea-companion" ]]; then
     cp "$d" "$RESOURCE_TMP"
     if replace_content_stable "$COMPANION_TOOLS_DIR/$(basename "$d")" "$RESOURCE_TMP"; then BUNDLE_CONTENT_CHANGED=1; fi
   done
+fi
+
+# Libraries the program's packages build for macOS (gea-native.json "macos"
+# "build", e.g. native-webgl-angle's ANGLE built from WebKit's sources, once and
+# cached): a dynamic library goes into Contents/Frameworks, where the package's
+# host loads it, and its notices into Resources.
+if [[ -n "$SINGLE_APP_DIR" ]]; then
+  PACKAGE_BUILDS="$(node --input-type=module -e "
+    import { readUikitNativePackages } from '$ROOT_DIR/targets/ios/native-packages.mjs'
+    import fs from 'node:fs'
+    const graph = process.argv[2]
+    const found = readUikitNativePackages({ appRoot: process.argv[1], moduleGraphPath: fs.existsSync(graph) ? graph : undefined, target: 'macos' })
+    for (const file of found.libraries) if (file.endsWith('.dylib')) console.log('lib ' + file)
+    for (const file of found.resources) console.log('res ' + file)
+  " "$SINGLE_APP_DIR" "$GENERATED_DIR/module-graph/gea-module-graph.json")" || { echo "Package native builds failed for '$APP_ID'" >&2; exit 1; }
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    kind="${line%% *}"; file="${line#* }"
+    if [[ "$kind" == lib ]]; then dest="$APP_BUNDLE/Contents/Frameworks/$(basename "$file")"; else dest="$RES_DIR/$(basename "$file")"; fi
+    mkdir -p "$(dirname "$dest")"
+    if [[ ! -f "$dest" ]] || ! cmp -s "$file" "$dest"; then
+      cp "$file" "$dest"
+      BUNDLE_CONTENT_CHANGED=1
+    fi
+  done <<< "$PACKAGE_BUILDS"
 fi
 timing_mark resources
 

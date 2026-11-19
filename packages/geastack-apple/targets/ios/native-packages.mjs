@@ -119,7 +119,9 @@ function buildOutputs(root, manifest, platform, build, where, log) {
   if (outputs.some((file) => !fs.existsSync(file))) {
     log(`[gea] building ${libraries.join(', ')} for ${platform} from ${manifest.name} (once; cached in ${out})`)
     const runner = /\.sh$/.test(script) ? ['bash', [script, ...command.slice(1), '--out', out]] : [script, [...command.slice(1), '--out', out]]
-    execFileSync(runner[0], runner[1], { cwd: root, stdio: ['ignore', 'inherit', 'inherit'] })
+    // The build's own output goes to stderr: callers read this module's answer
+    // from stdout.
+    execFileSync(runner[0], runner[1], { cwd: root, stdio: ['ignore', 2, 'inherit'] })
     for (const file of outputs) mustExist(file, `${where} (after ${command[0]})`)
   }
   return {
