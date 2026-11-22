@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -73,10 +74,21 @@ NSString *familyForId(int id)
 // the process lifetime: the rasterizer keeps stbtt_fontinfo pointers into
 // them across atlas rebuilds. Construct-on-first-use for the same dyld-
 // initializer-ordering reason as FamilyRegistry above.
+using FontBytes = std::shared_ptr<const std::vector<std::uint8_t>>;
+using FontNames = std::unordered_map<std::string, FontBytes>;
+
+struct FontFile {
+	struct stat stamp;
+	FontBytes bytes;
+};
+
 struct TtfByteRegistry {
 	std::mutex lock;
-	std::unordered_map<std::string, std::shared_ptr<const std::vector<std::uint8_t>>> byFamily;
-	std::unordered_map<std::string, std::shared_ptr<const std::vector<std::uint8_t>>> byAlias;
+	FontNames byFamily;
+	FontNames byAlias;
+	FontNames documentFonts;
+	FontNames pendingFonts;
+	std::unordered_map<std::string, FontFile> files;
 };
 
 TtfByteRegistry &ttfByteRegistry()
@@ -94,19 +106,19 @@ std::string lowercased(const std::string &value)
 
 bool softwareTextMeasurement = false;
 
-void registerTtfBytesForFamily(NSString *path, NSArray<NSString *> *aliases)
+bool registerTtfBytesForFamily(NSString *path, NSArray<NSString *> *aliases)
 {
 	NSData *data = [NSData dataWithContentsOfFile:path];
-	if (data.length == 0) return;
+	if (data.length == 0) return false;
 	CTFontDescriptorRef desc = CTFontManagerCreateFontDescriptorFromData((__bridge CFDataRef)data);
-	if (!desc) return;
+	if (!desc) return false;
 	CFStringRef family = (CFStringRef)CTFontDescriptorCopyAttribute(desc, kCTFontFamilyNameAttribute);
 	CFRelease(desc);
-	if (!family) return;
+	if (!family) return false;
 	char buf[256] = {0};
 	const bool ok = CFStringGetCString(family, buf, sizeof(buf), kCFStringEncodingUTF8);
 	CFRelease(family);
-	if (!ok || !buf[0]) return;
+	if (!ok || !buf[0]) return false;
 	const auto *bytes = static_cast<const std::uint8_t *>(data.bytes);
 	TtfByteRegistry &registry = ttfByteRegistry();
 	std::scoped_lock guard(registry.lock);
@@ -115,6 +127,7 @@ void registerTtfBytesForFamily(NSString *path, NSArray<NSString *> *aliases)
 	auto font = std::make_shared<const std::vector<std::uint8_t>>(bytes, bytes + data.length);
 	registry.byFamily.emplace(lowercased(buf), font);
 	for (NSString *alias in aliases) registry.byAlias.emplace(alias.UTF8String, font);
+	return true;
 }
 
 }  // namespace
@@ -129,9 +142,11 @@ const std::uint8_t *runtimeTtfBytesForFamilyId(int familyId, unsigned long *leng
 	TtfByteRegistry &registry = ttfByteRegistry();
 	std::scoped_lock guard(registry.lock);
 	const auto key = lowercased(family.UTF8String);
+	const auto document = registry.documentFonts.find(key);
 	const auto alias = registry.byAlias.find(key);
 	const auto fallback = registry.byFamily.find(key);
-	const auto *font = alias != registry.byAlias.end() ? alias->second.get()
+	const auto *font = document != registry.documentFonts.end() ? document->second.get()
+	    : alias != registry.byAlias.end() ? alias->second.get()
 	    : fallback != registry.byFamily.end() ? fallback->second.get() : nullptr;
 	if (!font) return nullptr;
 	if (length) *length = font->size();
@@ -238,6 +253,58 @@ int registerCustomTtfDirectory(NSString *directoryPath)
 		}
 	}
 	return count;
+}
+
+extern "C" void gea_macos_begin_runtime_fonts()
+{
+	auto &registry = ttfByteRegistry();
+	std::scoped_lock guard(registry.lock);
+	registry.pendingFonts.clear();
+}
+
+extern "C" bool gea_macos_register_runtime_font(const char *path, const char *family)
+{
+	struct stat stamp{};
+	if (!family || !*family || stat(path, &stamp) != 0 || !S_ISREG(stamp.st_mode) ||
+	    stamp.st_size <= 0 || stamp.st_size > 16 * 1024 * 1024) return false;
+	auto &registry = ttfByteRegistry();
+	std::scoped_lock guard(registry.lock);
+	const auto existing = registry.files.find(path);
+	FontBytes bytes;
+	if (existing != registry.files.end()) {
+		const auto &old = existing->second.stamp;
+		if (old.st_dev == stamp.st_dev && old.st_ino == stamp.st_ino &&
+		    old.st_size == stamp.st_size && old.st_ctimespec.tv_sec == stamp.st_ctimespec.tv_sec &&
+		    old.st_ctimespec.tv_nsec == stamp.st_ctimespec.tv_nsec) {
+			bytes = existing->second.bytes;
+		}
+	}
+	if (!bytes) {
+		NSString *filename = [NSString stringWithUTF8String:path];
+		NSData *data = filename ? [NSData dataWithContentsOfFile:filename] : nil;
+		if (data.length != static_cast<NSUInteger>(stamp.st_size)) return false;
+		CTFontDescriptorRef descriptor = CTFontManagerCreateFontDescriptorFromData((__bridge CFDataRef)data);
+		if (!descriptor) return false;
+		CFRelease(descriptor);
+		const auto *begin = static_cast<const std::uint8_t *>(data.bytes);
+		bytes = std::make_shared<const std::vector<std::uint8_t>>(begin, begin + data.length);
+		if (registry.files.size() >= 32) registry.files.clear();
+		registry.files.insert_or_assign(path, FontFile{stamp, bytes});
+	}
+	registry.pendingFonts.emplace(lowercased(family), bytes);
+	return true;
+}
+
+extern "C" void gea_macos_commit_runtime_fonts()
+{
+	auto &registry = ttfByteRegistry();
+	std::scoped_lock guard(registry.lock);
+	if (registry.documentFonts != registry.pendingFonts) {
+		// The old tree is gone. Release glyph slots before dropping their byte buffers.
+		gea::framework::graphics::FontRegistry::invalidateRuntimeFonts();
+		registry.documentFonts.swap(registry.pendingFonts);
+	}
+	registry.pendingFonts.clear();
 }
 
 }  // namespace gea::macos

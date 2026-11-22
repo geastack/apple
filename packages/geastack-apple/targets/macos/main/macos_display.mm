@@ -75,11 +75,20 @@ void submit_full_frame()
 
 bool gea_macos_prepare_prerender(int width, int height)
 {
-	g_canvas_w = width;
-	g_canvas_h = height;
+	if (!g_framebuffer || width != g_canvas_w || height != g_canvas_h) {
+		auto *pixels = static_cast<gea::framework::graphics::pixel::native_t *>(
+		    std::calloc(static_cast<size_t>(width) * height, sizeof(*g_framebuffer)));
+		if (!pixels) return false;
+		std::free(g_framebuffer);
+		g_framebuffer = pixels;
+		g_canvas_w = width;
+		g_canvas_h = height;
+	}
 	g_prerender = true;
-	ensure_canvas();
-	return g_framebuffer != nullptr;
+	g_canvas.bindPixels(g_framebuffer, width, height);
+	g_canvas.setGlobalAlpha(255);
+	g_canvas.clear(0);
+	return true;
 }
 
 bool gea_macos_write_prerender_png(NSString *path)
