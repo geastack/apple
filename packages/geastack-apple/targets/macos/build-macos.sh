@@ -396,7 +396,7 @@ resolve_app_dir() {
 }
 
 # Info.plist comes from the shared template plus the optional `infoPlist`
-# object of apps/<id>/macos.json (usage descriptions and other per-app keys).
+# object of the app's macos.json (usage descriptions and other per-app keys).
 INFO_PLIST_TMP="$BUILD_DIR/Info.plist.tmp.$$"
 sed -e "s/@APP_EXEC@/$APP_EXEC/g" \
     -e "s/@APP_ID@/$APP_ID/g" \
@@ -2128,7 +2128,7 @@ done
 
 # Per-app window config — the macOS main reads window.json out of Resources/
 # at launch to pick up size, transparent title bar, dark appearance, etc.
-# Source is apps/<id>/macos.json overlaid with gea.targets.macos.window from
+# Source is the app's macos.json overlaid with gea.targets.macos.window from
 # the app's package.json (window-config.mjs), written as window.json so the runtime path is stable
 # regardless of which app id produced it.
 APP_DIR_FOR_CONFIG="$(resolve_app_dir "$APP_ID")"

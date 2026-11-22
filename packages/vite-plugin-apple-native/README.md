@@ -27,7 +27,9 @@ export default defineConfig({
 })
 ```
 
-Consumed by the Apple example apps (`ios-*`, `notes-native`), which depend on
-`@geastack/vite-plugin-apple-native` like any other package. Babel
+Consumed by the Apple example apps (`ios-*`, `notes-native`,
+`three-angle-metal`, `three-angle-metal-prototype`, `three-batched-mesh`). An
+app that uses it lists `@geastack/vite-plugin-apple-native` in its
+dependencies like any other package. Babel
 (`@babel/parser`/`traverse`/`types`/`generator`) is a direct dependency of this
 package and is resolved from here.

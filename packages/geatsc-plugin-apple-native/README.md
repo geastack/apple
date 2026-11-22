@@ -12,13 +12,15 @@ npm install @geastack/geatsc-plugin-apple-native
 
 ## How it is loaded
 
-`@geastack/core`'s build driver adds the plugin automatically when an app is
-built for an Apple target. It first generates `gea-apple-metadata.json` into
-the build output from the bindings the app uses, then passes that file as the
-`apple.metadata` plugin option. By hand:
+`@geastack/core`'s build driver adds the plugin automatically when
+`@geastack/apple`'s macOS, iOS or tvOS build script compiles an app. It first
+generates `gea-apple-metadata.json` into the build output from the bindings the
+app uses, then passes that file as the `apple.metadata` plugin option. By hand
+(`--out-dir` is required; the emitted C++ units are written there):
 
 ```sh
 geatsc compile-module-graph gea-module-graph.json --entry src/index.tsx \
+  --out-dir dist/geatsc \
   --plugin @geastack/geatsc-plugin-apple-native \
   --plugin-option apple.metadata=dist/gea-apple-metadata.json
 ```
