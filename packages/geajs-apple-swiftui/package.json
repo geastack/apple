@@ -1,6 +1,6 @@
 {
   "name": "@geastack/apple-swiftui",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Optional JSX-to-SwiftUI source helpers for Apple-native Gea targets.",
   "license": "Apache-2.0",
   "repository": {
@@ -34,7 +34,8 @@
   "scripts": {
     "prepublishOnly": "npm run build",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && tsc -p tsconfig.test.json && node --test test/*.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

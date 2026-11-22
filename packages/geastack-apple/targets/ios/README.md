@@ -1,9 +1,18 @@
 # iOS target
 
-Build a gea-embedded JSX app as a native UIKit app.
+Build a Gea JSX app as a native UIKit app.
 
-From an app that depends on `@geastack/apple` (every iOS example does, and
-`gea create --targets ios` adds it), the CLI drives this target:
+The app needs `@geastack/apple` and `@geastack/cli` (0.1.110 or later for tvOS)
+in its own dependencies and `"ios": true` under `gea.targets` in its
+`package.json`; `npx create-geastack my-app --targets ios` sets up all three,
+and for an existing app:
+
+```bash
+npm install @geastack/apple
+npm install --save-dev @geastack/cli
+```
+
+From the app folder, the CLI drives this target:
 
 ```bash
 npx gea build --target ios                 # simulator .app, no launch
@@ -12,11 +21,15 @@ npx gea run --target ios                   # build, install and launch on a simu
 npx gea run --target ios --mode device     # build, sign, install and launch on an iPhone
 ```
 
-The same script can be run directly from the app folder; the CLI passes the
-app id and destination through unchanged:
+The CLI runs `build-ios.sh <app-id> <simulator|device> [tvos]` from the
+installed package, with `GEA_IOS_SKIP_LAUNCH=1` for `gea build` and the app's
+build configuration from `gea.targets.ios`. The script can also be run
+directly from the app folder; it then installs and launches the app after
+building unless `GEA_IOS_SKIP_LAUNCH=1` is set, and does not apply the
+`gea.targets.ios.build` settings:
 
 ```bash
-node_modules/@geastack/apple/targets/ios/build-ios.sh <app-id> simulator
+GEA_IOS_SKIP_LAUNCH=1 node_modules/@geastack/apple/targets/ios/build-ios.sh <app-id> simulator
 ```
 
 The script resolves `@geastack/core`, `@geastack/compiler`, the apple-native
@@ -39,7 +52,7 @@ GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 npx gea run --target ios --mode device
 To see the automatically detected team id:
 
 ```bash
-targets/ios/detect-development-team.mjs
+node node_modules/@geastack/apple/targets/ios/detect-development-team.mjs
 ```
 
 Signed device builds auto-pick an attached iPhone with Developer Mode enabled,
@@ -63,18 +76,20 @@ the source of truth.
 ## tvOS
 
 Apps that declare `gea.targets.tvos` can use the shared UIKit host on tvOS 17
-or later. Install the tvOS platform in Xcode's Components settings. From the
-Geastack examples project, run the JSX demo on an Apple TV simulator:
+or later. Install the tvOS platform in Xcode's Components settings. The app
+needs the same `@geastack/apple` and `@geastack/cli` dependencies as on iOS
+(the `three-tvos` example lists both). From the app folder, run it on an Apple
+TV simulator:
 
 ```sh
-gea run --target tvos --app bouncing-balls-jsx
+npx gea run --target tvos
 ```
 
 For a physical Apple TV, pair it with Xcode over the local network and use an
 Apple development team configured for the device:
 
 ```sh
-GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 gea run --target tvos --mode device --app bouncing-balls-jsx
+GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 npx gea run --target tvos --mode device
 ```
 
 Use `gea build` with the same options to generate the Xcode project and build

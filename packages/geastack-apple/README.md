@@ -10,22 +10,31 @@ npm install @geastack/apple
 
 ## Building an app
 
-The `gea` CLI drives the targets:
+The `gea` CLI drives the targets. It is a separate package: install
+`@geastack/cli` in the app too (0.1.110 or later for tvOS), and declare each
+target in the app's `package.json`, for example
+`"gea": { "targets": { "macos": true, "ios": true, "tvos": true } }`. From the
+app folder:
 
 ```sh
-gea build --target macos
-gea build --target ios
-gea build --target tvos
+npm install --save-dev @geastack/cli
+npx gea build --target macos
+npx gea build --target ios
+npx gea build --target tvos
 ```
 
 The target build scripts can also be run directly from an app directory that
-has the GeaStack packages installed:
+has the GeaStack packages (including `@geastack/cli`) installed. Run this way
+they do not receive the app's `gea.targets.<target>.build` configuration, and
+`build-ios.sh` boots, installs and launches the app on a simulator or device
+after building, like `gea run`; prefix `GEA_IOS_SKIP_LAUNCH=1` to stop after
+the build, which is what `gea build` does:
 
 ```sh
 node_modules/@geastack/apple/targets/macos/build-macos.sh my-app
-node_modules/@geastack/apple/targets/ios/build-ios.sh my-app simulator
+GEA_IOS_SKIP_LAUNCH=1 node_modules/@geastack/apple/targets/ios/build-ios.sh my-app simulator
 GEA_IOS_DEVELOPMENT_TEAM=ABCDE12345 node_modules/@geastack/apple/targets/ios/build-ios.sh my-app device
-node_modules/@geastack/apple/targets/ios/build-ios.sh my-app simulator tvos
+GEA_IOS_SKIP_LAUNCH=1 node_modules/@geastack/apple/targets/ios/build-ios.sh my-app simulator tvos
 ```
 
 Requires Xcode with the macOS, iOS and tvOS SDKs you target. Each target directory has its own
@@ -138,7 +147,8 @@ string on success. A located occurrence must lie within a week of its
 `occurrenceDate`.
 
 macOS ends a process that asks for calendar access without a usage
-description. Add both keys to `apps/<id>/macos.json`; its optional `infoPlist`
+description. Add both keys to `macos.json` in the app folder (next to its
+`package.json`); its optional `infoPlist`
 object is merged over the shared `Info.plist` template:
 
 ```json

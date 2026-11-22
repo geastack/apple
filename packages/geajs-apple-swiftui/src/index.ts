@@ -1,6 +1,15 @@
 export const Fragment = Symbol.for('@geajs/apple-swiftui.fragment')
 
 export type SwiftUIElementType = string | typeof Fragment
+
+// View names as values, so JSX can name them: `<VStack spacing={8}>`. A
+// capitalised JSX tag is an identifier, not a string, so each view the
+// renderer knows by name has one. Any other view is `createSwiftUIElement('Name', ...)`.
+export const VStack = 'VStack'
+export const HStack = 'HStack'
+export const ZStack = 'ZStack'
+export const Text = 'Text'
+export const Button = 'Button'
 export type SwiftUIPrimitiveChild = string | number | boolean | null | undefined
 export type SwiftUIChild = SwiftUIPrimitiveChild | SwiftUIElement | SwiftUIChild[]
 
