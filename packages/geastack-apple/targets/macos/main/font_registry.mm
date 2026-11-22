@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -74,7 +75,8 @@ NSString *familyForId(int id)
 // initializer-ordering reason as FamilyRegistry above.
 struct TtfByteRegistry {
 	std::mutex lock;
-	std::unordered_map<std::string, std::vector<std::uint8_t>> byFamily;
+	std::unordered_map<std::string, std::shared_ptr<const std::vector<std::uint8_t>>> byFamily;
+	std::unordered_map<std::string, std::shared_ptr<const std::vector<std::uint8_t>>> byAlias;
 };
 
 TtfByteRegistry &ttfByteRegistry()
@@ -90,7 +92,9 @@ std::string lowercased(const std::string &value)
 	return out;
 }
 
-void registerTtfBytesForFamily(NSString *path)
+bool softwareTextMeasurement = false;
+
+void registerTtfBytesForFamily(NSString *path, NSArray<NSString *> *aliases)
 {
 	NSData *data = [NSData dataWithContentsOfFile:path];
 	if (data.length == 0) return;
@@ -108,7 +112,9 @@ void registerTtfBytesForFamily(NSString *path)
 	std::scoped_lock guard(registry.lock);
 	// First face wins (e.g. Inter-Regular before other weights of the family):
 	// the runtime rasterizer keys on the family alone.
-	registry.byFamily.emplace(lowercased(buf), std::vector<std::uint8_t>(bytes, bytes + data.length));
+	auto font = std::make_shared<const std::vector<std::uint8_t>>(bytes, bytes + data.length);
+	registry.byFamily.emplace(lowercased(buf), font);
+	for (NSString *alias in aliases) registry.byAlias.emplace(alias.UTF8String, font);
 }
 
 }  // namespace
@@ -122,10 +128,14 @@ const std::uint8_t *runtimeTtfBytesForFamilyId(int familyId, unsigned long *leng
 	if (!family || family.length == 0) return nullptr;
 	TtfByteRegistry &registry = ttfByteRegistry();
 	std::scoped_lock guard(registry.lock);
-	const auto it = registry.byFamily.find(lowercased(family.UTF8String));
-	if (it == registry.byFamily.end()) return nullptr;
-	if (length) *length = it->second.size();
-	return it->second.data();
+	const auto key = lowercased(family.UTF8String);
+	const auto alias = registry.byAlias.find(key);
+	const auto fallback = registry.byFamily.find(key);
+	const auto *font = alias != registry.byAlias.end() ? alias->second.get()
+	    : fallback != registry.byFamily.end() ? fallback->second.get() : nullptr;
+	if (!font) return nullptr;
+	if (length) *length = font->size();
+	return font->data();
 }
 
 static NSFont *self_resolveFont(int fontId, int sizePx, int weight, int stretch)
@@ -186,18 +196,35 @@ NSFont *fontForId(int fontId, int sizePx, int weight, int stretch)
 
 NSFont *fontForId(int fontId, int sizePx) { return fontForId(fontId, sizePx, 400, 1000); }
 
+void useSoftwareTextMeasurement()
+{
+	softwareTextMeasurement = true;
+}
+
 int registerCustomTtfDirectory(NSString *directoryPath)
 {
 	NSFileManager *fm = [NSFileManager defaultManager];
 	BOOL isDir = NO;
 	if (![fm fileExistsAtPath:directoryPath isDirectory:&isDir] || !isDir) return 0;
 	NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:directoryPath error:nil];
+	NSString *aliasPath = [directoryPath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"font-aliases.json"];
+	NSData *aliasData = [NSData dataWithContentsOfFile:aliasPath];
+	NSDictionary *aliases = aliasData ? [NSJSONSerialization JSONObjectWithData:aliasData options:0 error:nil] : nil;
+	NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *aliasesByFile = [NSMutableDictionary dictionary];
+	if ([aliases isKindOfClass:NSDictionary.class]) {
+		for (NSString *alias in aliases) {
+			NSString *filename = aliases[alias];
+			if (![filename isKindOfClass:NSString.class]) continue;
+			if (!aliasesByFile[filename]) aliasesByFile[filename] = [NSMutableArray array];
+			[aliasesByFile[filename] addObject:alias];
+		}
+	}
 	int count = 0;
 	for (NSString *name in entries) {
 		NSString *lower = name.lowercaseString;
 		if (![lower hasSuffix:@".ttf"] && ![lower hasSuffix:@".otf"]) continue;
 		NSString *path = [directoryPath stringByAppendingPathComponent:name];
-		registerTtfBytesForFamily(path);
+		registerTtfBytesForFamily(path, aliasesByFile[name]);
 		CFErrorRef err = NULL;
 		CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:path];
 		if (CTFontManagerRegisterFontsForURL(url, kCTFontManagerScopeProcess, &err)) {
@@ -279,7 +306,7 @@ static bool measureNativeText(const char *text,
                                       int *outWidth,
                                       int *outHeight)
 {
-	if (!outWidth || !outHeight) return false;
+	if (gea::macos::softwareTextMeasurement || !outWidth || !outHeight) return false;
 	if (!text || !text[0]) {
 		*outWidth = 0;
 		*outHeight = 0;

@@ -12,6 +12,7 @@ extern void gea_macos_debugger_start();
 
 #include "font_registry.h"
 #include "macos_native_shell.h"
+#include "macos_prerender.h"
 #include "macos_renderer.h"
 #include "macos_background_test.h"
 #include "press_bridge.h"
@@ -60,6 +61,7 @@ namespace gea::macos { void installWifiDriver(); int nodeIdForView(NSView *view)
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1236,12 +1238,58 @@ void gea::apple::AppKit::setScrollDocumentTopAligned(gea::apple::AppKit::NSScrol
 }
 #endif
 
+static int prerender(int argc, const char *argv[])
+{
+	if (argc != 8) return 2;
+	const int width = std::atoi(argv[3]);
+	const int height = std::atoi(argv[4]);
+	const double dpr = std::atof(argv[5]);
+	const int fps = std::atoi(argv[6]);
+	const int targetMs = std::atoi(argv[7]);
+	if (width < 1 || width > 8192 || height < 1 || height > 8192 ||
+	    !std::isfinite(dpr) || dpr < 0.1 || dpr > 8 ||
+	    fps < 1 || fps > 1000 || targetMs < 0) return 2;
+	if (!gea_macos_prepare_prerender(width, height)) return 1;
+
+	NSString *fontsDir = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Fonts"];
+	gea::macos::registerCustomTtfDirectory(fontsDir);
+	gea::macos::useSoftwareTextMeasurement();
+	gea::platform::storage::setMountProvider(+[]() { return true; });
+
+	gea_macos_set_prerender_time(0);
+	// Seed the timer scheduler before app initialization schedules any timers.
+	gea::host::runAnimationFrameCallbacks(0);
+	gea::framework::app::Application::init(width, height, dpr);
+	auto &tree = gea::embedded::ui::Tree::instance();
+	if (tree.mountedRoot() < 0) {
+		std::fputs("Gea prerender requires a mounted UI tree\n", stderr);
+		return 1;
+	}
+	gea::css::DeclarativeAnimations::scanAndStart(0);
+
+	for (std::int64_t frame = 0; ; ++frame) {
+		const auto tickMs = (frame * 1000 + fps / 2) / fps;
+		const int timeMs = static_cast<int>(std::min<std::int64_t>(tickMs, targetMs));
+		@autoreleasepool {
+			gea_macos_set_prerender_time(timeMs);
+			gea::embedded::ui::StyleSheet::instance().startCssAnimations(timeMs);
+			gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(timeMs));
+			gea::framework::app::Application::frame(timeMs);
+		}
+		if (timeMs == targetMs) break;
+	}
+	if (!gea_macos_write_prerender_png([NSString stringWithUTF8String:argv[2]])) {
+		std::fprintf(stderr, "Could not write PNG to %s\n", argv[2]);
+		return 1;
+	}
+	return 0;
+}
+
 int main(int argc, const char *argv[])
 {
 	GeaNativeTerminationGuard terminationGuard;
-	(void)argc;
-	(void)argv;
 	@autoreleasepool {
+		if (argc > 1 && std::strcmp(argv[1], "--gea-prerender") == 0) return prerender(argc, argv);
 		gea_macos_smoke_log("[gea-macos] main entered");
 		const bool backgroundTest = gea::macos::background_test::enabled();
 		NSApplication *app = [NSApplication sharedApplication];

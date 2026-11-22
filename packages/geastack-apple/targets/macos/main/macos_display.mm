@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 #include "display.h"
+#include "macos_prerender.h"
 #include "canvas.h"
 #include "host/display_orientation.h"
 #include "pixel.h"
@@ -29,6 +30,7 @@ int g_canvas_w = gea::platform::display::kWidth;
 int g_canvas_h = gea::platform::display::kHeight;
 int g_brightness = 100;
 std::uint8_t g_alpha = 255;
+bool g_prerender = false;
 int g_flush_rows = 0;
 int g_flush_depth = 0;
 int g_flush_calls = 0;
@@ -43,13 +45,13 @@ void ensure_canvas()
 
 bool framebuffer_target()
 {
-	return gea::macos::thermalright::enabled();
+	return g_prerender || gea::macos::thermalright::enabled();
 }
 
 void count_rect(int x0, int y0, int x1, int y1)
 {
-	using gea::platform::display::kWidth;
-	using gea::platform::display::kHeight;
+	const int kWidth = g_canvas_w;
+	const int kHeight = g_canvas_h;
 	if (x0 < 0) x0 = 0;
 	if (y0 < 0) y0 = 0;
 	if (x1 >= kWidth) x1 = kWidth - 1;
@@ -60,7 +62,7 @@ void count_rect(int x0, int y0, int x1, int y1)
 
 void submit_full_frame()
 {
-	if (!framebuffer_target()) return;
+	if (g_prerender || !framebuffer_target()) return;
 	ensure_canvas();
 	#if GEA_MACOS_THERMALRIGHT_DISPLAY_TARGET
 	gea::macos::thermalright::submitRgb565(g_framebuffer,
@@ -70,6 +72,37 @@ void submit_full_frame()
 }
 
 }  // namespace
+
+bool gea_macos_prepare_prerender(int width, int height)
+{
+	g_canvas_w = width;
+	g_canvas_h = height;
+	g_prerender = true;
+	ensure_canvas();
+	return g_framebuffer != nullptr;
+}
+
+bool gea_macos_write_prerender_png(NSString *path)
+{
+	NSBitmapImageRep *image = [[NSBitmapImageRep alloc]
+		initWithBitmapDataPlanes:nullptr pixelsWide:g_canvas_w pixelsHigh:g_canvas_h
+		bitsPerSample:8 samplesPerPixel:3 hasAlpha:NO isPlanar:NO
+		colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+	if (!image) return false;
+	for (int y = 0; y < g_canvas_h; ++y) {
+		auto *row = image.bitmapData + y * image.bytesPerRow;
+		for (int x = 0; x < g_canvas_w; ++x) {
+			int r, g, b, a;
+			gea::framework::graphics::pixel::unpackNative8(
+				g_framebuffer[static_cast<size_t>(y) * g_canvas_w + x], &r, &g, &b, &a);
+			row[x * 3] = r;
+			row[x * 3 + 1] = g;
+			row[x * 3 + 2] = b;
+		}
+	}
+	NSData *png = [image representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+	return [png writeToFile:path atomically:YES];
+}
 
 namespace gea::platform::display {
 
@@ -129,8 +162,8 @@ void Display::flushRectsRasterized(const DisplayFlushRect *rects, int count, Dis
 	for (int i = 0; i < count; i++) {
 		int x0 = std::max(0, rects[i].x0);
 		int y0 = std::max(0, rects[i].y0);
-		int x1 = std::min(kWidth - 1, rects[i].x1);
-		int y1 = std::min(kHeight - 1, rects[i].y1);
+		int x1 = std::min(g_canvas_w - 1, rects[i].x1);
+		int y1 = std::min(g_canvas_h - 1, rects[i].y1);
 		if (x0 > x1 || y0 > y1) continue;
 		const int w = x1 - x0 + 1;
 		const int h = y1 - y0 + 1;
@@ -138,7 +171,7 @@ void Display::flushRectsRasterized(const DisplayFlushRect *rects, int count, Dis
 		raster(pixels.data(), w, h, x0, y0, user);
 		for (int row = 0; row < h; row++) {
 			for (int col = 0; col < w; ++col)
-			g_framebuffer[static_cast<std::size_t>(y0 + row) * kWidth + x0 + col] = pixels[static_cast<std::size_t>(row) * w + col];
+			g_framebuffer[static_cast<std::size_t>(y0 + row) * g_canvas_w + x0 + col] = pixels[static_cast<std::size_t>(row) * w + col];
 		}
 		g_canvas.markDirty(x0, y0, x1, y1);
 	}
@@ -158,8 +191,8 @@ bool Display::streamRect(int x, int y, int w, int h, DisplayStreamRasterFn raste
 	if (!raster || w <= 0 || h <= 0) return false;
 	int x0 = std::max(0, x);
 	int y0 = std::max(0, y);
-	int x1 = std::min(kWidth - 1, x + w - 1);
-	int y1 = std::min(kHeight - 1, y + h - 1);
+	int x1 = std::min(g_canvas_w - 1, x + w - 1);
+	int y1 = std::min(g_canvas_h - 1, y + h - 1);
 	if (x0 > x1 || y0 > y1) return true;
 
 	const int rw = x1 - x0 + 1;
@@ -168,7 +201,7 @@ bool Display::streamRect(int x, int y, int w, int h, DisplayStreamRasterFn raste
 	raster(pixels.data(), rw, rh, x0, y0, user);
 	for (int row = 0; row < rh; row++) {
 		for (int col = 0; col < rw; ++col)
-			g_framebuffer[static_cast<std::size_t>(y0 + row) * kWidth + x0 + col] = pixels[static_cast<std::size_t>(row) * rw + col];
+			g_framebuffer[static_cast<std::size_t>(y0 + row) * g_canvas_w + x0 + col] = pixels[static_cast<std::size_t>(row) * rw + col];
 	}
 	g_canvas.markDirty(x0, y0, x1, y1);
 	flush();
@@ -305,7 +338,7 @@ bool Display::present(const DisplayPresentCommand *commands, int command_count)
 void Display::setFlushConfig(int chunk_rows, int queue_depth) { g_flush_rows = chunk_rows; g_flush_depth = queue_depth; }
 int Display::flushChunkRows() { return g_flush_rows; }
 int Display::flushQueueDepth() { return g_flush_depth; }
-int Display::flushBufferBytes() { return kWidth * g_flush_rows * 2 * g_flush_depth; }
+int Display::flushBufferBytes() { return g_canvas_w * g_flush_rows * 2 * g_flush_depth; }
 
 void Display::pushClip(int x, int y, int w, int h) { if (framebuffer_target()) canvas()->pushClip(x, y, w, h); }
 void Display::popClip() { if (framebuffer_target()) canvas()->popClip(); }

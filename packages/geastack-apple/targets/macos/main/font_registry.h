@@ -25,6 +25,9 @@ NSFont *fontForId(int fontId, int sizePx, int weight, int stretch);
 // after the app bundle is known.
 int registerCustomTtfDirectory(NSString *directoryPath);
 
+// Match software glyph layout and paint during offscreen capture.
+void useSoftwareTextMeasurement();
+
 // Picks the right NSLineBreakMode for `text` rendered in `font` within
 // `maxWidth` points. Returns word-wrap when every space-separated chunk fits
 // on a line by itself, otherwise char-wrap so that a long unbreakable run
