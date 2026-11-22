@@ -86,6 +86,7 @@ function walkCss(root, visit) {
 // not leave stale resources in the app bundle.
 const desiredFonts = new Map()
 const desiredFontLicenses = new Map()
+const fontAliases = new Map()
 for (const root of [...appDirs, ...sharedCssDirs]) {
   walkCss(root, (cssPath) => {
     const css = fs.readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
@@ -100,6 +101,11 @@ for (const root of [...appDirs, ...sharedCssDirs]) {
       const resolved = path.resolve(path.dirname(cssPath), clean)
       if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) continue
       const basename = path.basename(resolved)
+      const family = face[1].match(/(?:^|;)\s*font-family\s*:\s*(?:"([^"]+)"|'([^']+)'|([^;]+))/i)
+      const alias = (family?.[1] || family?.[2] || family?.[3] || '').trim().toLowerCase()
+      if (alias && (!desiredFonts.has(basename) || desiredFonts.get(basename) === resolved) && !fontAliases.has(alias)) {
+        fontAliases.set(alias, basename)
+      }
       if (!desiredFonts.has(basename)) {
         desiredFonts.set(basename, resolved)
         // Preserve licenses alongside packaged font bytes, using a font-specific
@@ -156,6 +162,17 @@ if (fs.existsSync(fontLicensesDir)) {
 }
 for (const [name, source] of desiredFontLicenses) syncFile(source, path.join(fontLicensesDir, name))
 if (fs.existsSync(fontLicensesDir) && fs.readdirSync(fontLicensesDir).length === 0) fs.rmdirSync(fontLicensesDir)
+
+const aliasesPath = path.join(resourcesDir, 'font-aliases.json')
+if (fontAliases.size) {
+  const contents = JSON.stringify(Object.fromEntries(fontAliases), null, 2) + '\n'
+  if (!fs.existsSync(aliasesPath) || fs.readFileSync(aliasesPath, 'utf8') !== contents) {
+    const temporary = `${aliasesPath}.tmp.${process.pid}`
+    fs.writeFileSync(temporary, contents)
+    fs.renameSync(temporary, aliasesPath)
+    changed = true
+  }
+} else removeFile(aliasesPath)
 
 const windowConfig = path.join(resourcesDir, 'window.json')
 for (const entry of fs.readdirSync(resourcesDir, { withFileTypes: true })) {

@@ -994,6 +994,7 @@ case "${GEA_MACOS_THERMALRIGHT_PRODUCT_ID:-}" in
 esac
 if [[ "$THERMALRIGHT_DISPLAY_TARGET" == "0" ]]; then
   CXX_DEFINES+=(-DGEA_EMBEDDED_PIXEL_FORMAT=1 -DGEA_CSS_FONT_STRETCH=1) # RGBA8888 and native variable-font style for AppKit
+  CXX_DEFINES+=(-DGEA_EMBEDDED_HAS_GENERATED_FONTS=1) # Enable retained text rasterization via the runtime TTF hooks
 fi
 if [[ "$THERMALRIGHT_DISPLAY_TARGET" == "1" ]]; then
   THERMALRIGHT_WIDTH="${GEA_MACOS_THERMALRIGHT_WIDTH:-$THERMALRIGHT_DEFAULT_WIDTH}"
@@ -1124,6 +1125,8 @@ if [[ -n "$SINGLE_APP_DIR" ]]; then
       *) full_src="$SINGLE_APP_DIR/$native_src" ;;
     esac
     [[ -f "$full_src" ]] || continue
+    # Generated host calls can include headers beside their native source.
+    INCLUDES+=(-iquote "${full_src%/*}")
     case "$full_src" in
       *.c) C_SOURCES+=("$full_src") ;;
       *.m|*.mm) MM_SOURCES+=("$full_src") ;;
@@ -2047,8 +2050,8 @@ timing_mark link
 
 # Convert the app icon only when its resolved source, manifest metadata, or the
 # icon tooling changed. Ten `sips` subprocesses made this the largest historical
-# no-op phase.
-if [[ -n "$APP_META" ]]; then
+# no-op phase. A prerender bundle is run directly and needs no Finder icon.
+if [[ -n "$APP_META" && "${GEA_MACOS_PRERENDER:-0}" != "1" ]]; then
   ICON_OUTPUT="$RES_DIR/AppIcon.icns"
   ICON_INPUT_SIGNATURE_FILE="$BUILD_DIR/AppIcon.inputs"
   ICON_INPUT_SIGNATURE="$(node "$GEA_CLI" apps apple-icons "$APP_ID" --platform macos --signature)"
@@ -2072,7 +2075,7 @@ fi
 # Copy any TTF / OTF referenced by @font-face in CSS — for resident-app
 # builds we walk every resident's app dir so fonts used by other tiles
 # are also bundled.
-if [[ "$MACOS_PIPELINE_CACHE" == "0" ]]; then
+if [[ "$MACOS_PIPELINE_CACHE" == "0" && "${GEA_MACOS_PRERENDER:-0}" != "1" ]]; then
 FONTS_OUT="$RES_DIR/Fonts"
 mkdir -p "$FONTS_OUT"
 APP_DIRS_FOR_FONTS=()

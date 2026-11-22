@@ -1,12 +1,18 @@
 #import <Foundation/Foundation.h>
 #include "services/frame_scheduler.h"
+#include "macos_prerender.h"
 
+#include <atomic>
 #include <mach/mach_time.h>
 
 namespace {
 
+std::atomic<int> prerenderMillis{-1};
+
 int monotonicMillis()
 {
+	const int captureTime = prerenderMillis.load(std::memory_order_relaxed);
+	if (captureTime >= 0) return captureTime;
 	static mach_timebase_info_data_t tb = {0, 0};
 	if (tb.denom == 0) mach_timebase_info(&tb);
 	static const uint64_t start = mach_absolute_time();
@@ -17,6 +23,11 @@ int monotonicMillis()
 int g_frame_interval_ms = gea::framework::services::FrameScheduler::kDefaultFrameIntervalMs;
 
 }  // namespace
+
+void gea_macos_set_prerender_time(int timestampMs)
+{
+	prerenderMillis.store(timestampMs, std::memory_order_relaxed);
+}
 
 extern "C" int gea_embedded_now_ms(void)
 {
