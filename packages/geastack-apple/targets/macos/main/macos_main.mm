@@ -46,6 +46,10 @@ namespace gea::macos { void installWifiDriver(); int nodeIdForView(NSView *view)
 #include "css/declarative.h"
 #include "css/engine.h"
 #include "display.h"
+#if __has_include("platform/prerender_video.h")
+#include "platform/prerender_video.h"
+#define GEA_MACOS_PRERENDER_VIDEO 1
+#endif
 #include "platform/file_cache.h"
 #if __has_include("resident_apps.h")
 #include "resident_apps.h"
@@ -1270,32 +1274,52 @@ static bool loadPrerenderPage(int width, int height, double dpr)
 	return true;
 }
 
+static void paintPrerenderFrame(int timeMs)
+{
+	@autoreleasepool {
+		gea_macos_set_prerender_time(timeMs);
+		gea::embedded::ui::StyleSheet::instance().startCssAnimations(timeMs);
+		gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(timeMs));
+		gea::framework::app::Application::frame(timeMs);
+	}
+}
+
 static void drawPrerenderFrames(int fps, int targetMs)
 {
 	for (std::int64_t frame = 0; ; ++frame) {
 		const auto tickMs = (frame * 1000 + fps / 2) / fps;
 		const int timeMs = static_cast<int>(std::min<std::int64_t>(tickMs, targetMs));
-		@autoreleasepool {
-			gea_macos_set_prerender_time(timeMs);
-			gea::embedded::ui::StyleSheet::instance().startCssAnimations(timeMs);
-			gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(timeMs));
-			gea::framework::app::Application::frame(timeMs);
-		}
+		paintPrerenderFrame(timeMs);
 		if (timeMs == targetMs) break;
 	}
 }
 
 static int prerender(int argc, const char *argv[])
 {
-	if (argc != 8) return 2;
+	const bool video = std::strcmp(argv[1], "--gea-prerender-video") == 0;
+	if (argc != (video ? 9 : 8)) return 2;
 	const int width = std::atoi(argv[3]);
 	const int height = std::atoi(argv[4]);
 	const double dpr = std::atof(argv[5]);
 	const int fps = std::atoi(argv[6]);
 	const int targetMs = std::atoi(argv[7]);
 	if (!validPrerenderViewport(width, height, dpr) || fps < 1 || fps > 1000 || targetMs < 0) return 2;
-	preparePrerenderHost();
 	try {
+		if (video) {
+#if defined(GEA_MACOS_PRERENDER_VIDEO)
+			const int endMs = std::atoi(argv[8]);
+			if (endMs <= targetMs) return 2;
+			gea::platform::prerender::VideoFrames stream(width, height);
+			gea::platform::prerender::VideoClock clock(fps);
+			preparePrerenderHost();
+			if (!loadPrerenderPage(width, height, dpr)) throw std::runtime_error("Could not mount the page");
+			gea::platform::prerender::streamVideoFrames(stream, fps, targetMs, endMs, paintPrerenderFrame);
+			return 0;
+#else
+			throw std::runtime_error("The installed @geastack/core lacks native video export");
+#endif
+		}
+		preparePrerenderHost();
 		if (!loadPrerenderPage(width, height, dpr)) {
 			std::fputs("Gea prerender could not mount the page\n", stderr);
 			return 1;
@@ -1405,7 +1429,8 @@ int main(int argc, const char *argv[])
 {
 	GeaNativeTerminationGuard terminationGuard;
 	@autoreleasepool {
-		if (argc > 1 && std::strcmp(argv[1], "--gea-prerender") == 0) return prerender(argc, argv);
+		if (argc > 1 && (std::strcmp(argv[1], "--gea-prerender") == 0 ||
+		                 std::strcmp(argv[1], "--gea-prerender-video") == 0)) return prerender(argc, argv);
 		if (argc == 2 && std::strcmp(argv[1], "--gea-prerender-worker") == 0) return prerenderWorker();
 		gea_macos_smoke_log("[gea-macos] main entered");
 		const bool backgroundTest = gea::macos::background_test::enabled();
