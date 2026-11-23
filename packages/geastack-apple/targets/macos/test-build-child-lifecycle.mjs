@@ -24,6 +24,17 @@ const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), 'gea-macos-child-lifecy
 const workerPath = path.join(temporaryRoot, 'worker.sh')
 const fixturePath = path.join(temporaryRoot, 'fixture.sh')
 
+// The grandchild ignores TERM, so cleanup reaches it only through the KILL
+// escalation, which by design first waits out a TERM grace period with a ps
+// probe per poll. Its write must therefore come long after any cleanup that
+// works, however loaded the host (the release suite runs this beside clang
+// builds, where a 3 s sleep was overtaken by a cleanup that did kill it), yet
+// stay longer than the fixture's exit deadline: a cleanup that waits for the
+// grandchild to finish on its own, instead of killing it, then fails that
+// deadline rather than passing.
+const descendantSleepSeconds = 30
+const fixtureExitTimeoutMs = 15000
+
 writeFileSync(
   workerPath,
   `#!/usr/bin/env bash
@@ -32,7 +43,7 @@ root="$1"
 mode="$2"
 echo "$$" > "$root/$mode.child.pid"
 trap 'printf "%s\\n" child-term >> "$root/'"$mode"'.events"; exit 0' TERM HUP INT
-/bin/bash -c 'set -euo pipefail; root="$1"; mode="$2"; echo "$$" > "$root/$mode.grand.pid"; trap "" TERM HUP INT; sleep 3; echo orphan-write > "$root/$mode.orphan"' _ "$root" "$mode" &
+/bin/bash -c 'set -euo pipefail; root="$1"; mode="$2"; echo "$$" > "$root/$mode.grand.pid"; trap "" TERM HUP INT; sleep ${descendantSleepSeconds}; echo orphan-write > "$root/$mode.orphan"' _ "$root" "$mode" &
 grand="$!"
 wait "$grand"
 `,
@@ -115,13 +126,14 @@ const runInterruptFixture = async (mode) => {
   })
   const childPidFile = path.join(temporaryRoot, `${mode}.child.pid`)
   const grandPidFile = path.join(temporaryRoot, `${mode}.grand.pid`)
+  let grandPid = 0
   try {
     await waitFor(() => exists(childPidFile) && exists(grandPidFile))
     const childPid = Number(readFileSync(childPidFile, 'utf8').trim())
-    const grandPid = Number(readFileSync(grandPidFile, 'utf8').trim())
+    grandPid = Number(readFileSync(grandPidFile, 'utf8').trim())
     process.kill(fixture.pid, 'SIGTERM')
     const exit = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`fixture ${mode} did not exit`)), 5000)
+      const timeout = setTimeout(() => reject(new Error(`fixture ${mode} did not exit`)), fixtureExitTimeoutMs)
       fixture.once('close', (code, signal) => {
         clearTimeout(timeout)
         resolve({ code, signal })
@@ -140,6 +152,8 @@ const runInterruptFixture = async (mode) => {
   } finally {
     if (processIsRunning(fixture.pid)) fixture.kill('SIGKILL')
     if (processIsRunning(unrelated.pid)) unrelated.kill('SIGKILL')
+    // A failed cleanup must not leave the long-sleeping grandchild behind.
+    if (grandPid > 0 && processIsRunning(grandPid)) process.kill(grandPid, 'SIGKILL')
   }
 }
 
