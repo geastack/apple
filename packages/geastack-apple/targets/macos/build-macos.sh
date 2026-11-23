@@ -2000,6 +2000,13 @@ while IFS= read -r library; do [[ -z "$library" ]] || LINK_FRAMEWORKS+=("-l$libr
 node "$GEA_CLI" apps sync-native-resources "$APP_ID" --target macos --output "$RES_DIR" > "$BUILD_DIR/native-resources.json"
 if [[ "$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).changed))' "$BUILD_DIR/native-resources.json")" == "true" ]]; then BUNDLE_CONTENT_CHANGED=1; fi
 
+# These weak program hooks are emitted only for programs with cycle-collectable
+# values. ld64 requires named exceptions for unresolved executable symbols.
+MACOS_LINK_FLAGS=(
+  -Wl,-no_deduplicate
+  -Wl,-U,_gea_cycle_collection_defer_begin
+  -Wl,-U,_gea_cycle_collection_defer_end
+)
 LINK_OUTPUT="$MACOS_DIR/$APP_EXEC"
 LINK_OUTPUT_TMP="$LINK_OUTPUT.tmp.$$"
 LINK_SIGNATURE_FILE="$BUILD_DIR/link.sig"
@@ -2008,7 +2015,7 @@ LINK_SIGNATURE_TMP="$LINK_SIGNATURE_FILE.tmp.$$"
   printf 'compiler=%s\n' "$MACOS_COMPILER_VERSION"
   printf 'opt=%s\n' "$GEA_MACOS_OPT_LEVEL"
   printf 'debug=%s\n' "${GEA_MACOS_DEBUG_INFO:-}"
-  printf 'link=%s\n' -Wl,-no_deduplicate
+  printf 'link=%s\n' "${MACOS_LINK_FLAGS[@]}"
   printf 'framework=%s\n' "${LINK_FRAMEWORKS[@]}"
   printf 'object=%s\n' "${OBJ_FILES[@]}"
   for library in ${APP_NATIVE_LIBRARIES[@]+"${APP_NATIVE_LIBRARIES[@]}"}; do shasum -a 256 "$library"; done
@@ -2035,7 +2042,7 @@ if (( LINK_NEEDED != 0 )); then
   # entry address (CallableObject::callWithReceiver finds a method's receiver
   # check by it), so a folded method template ran its twin's check.
   macos_run_tracked_child clang++ -std=c++20 -ObjC++ -fobjc-arc "$GEA_MACOS_OPT_LEVEL" ${GEA_MACOS_DEBUG_INFO} \
-    -Wl,-no_deduplicate \
+    "${MACOS_LINK_FLAGS[@]}" \
     "${LINK_FRAMEWORKS[@]}" \
     "${OBJ_FILES[@]}" \
     ${APP_NATIVE_LIBRARIES[@]+"${APP_NATIVE_LIBRARIES[@]}"} \

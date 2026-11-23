@@ -46,6 +46,10 @@ namespace gea::macos { void installWifiDriver(); int nodeIdForView(NSView *view)
 #include "css/declarative.h"
 #include "css/engine.h"
 #include "display.h"
+#if __has_include("platform/prerender_video.h")
+#include "platform/prerender_video.h"
+#define GEA_MACOS_PRERENDER_VIDEO 1
+#endif
 #include "platform/file_cache.h"
 #if __has_include("resident_apps.h")
 #include "resident_apps.h"
@@ -66,6 +70,10 @@ namespace gea::macos { void installWifiDriver(); int nodeIdForView(NSView *view)
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <iostream>
+#include <string>
+#include <unistd.h>
 #include "gea_appkit_host.h"
 
 extern "C" int gea_embedded_now_ms(void);
@@ -1238,45 +1246,88 @@ void gea::apple::AppKit::setScrollDocumentTopAligned(gea::apple::AppKit::NSScrol
 }
 #endif
 
+static bool validPrerenderViewport(int width, int height, double dpr)
+{
+	return width >= 1 && width <= 8192 && height >= 1 && height <= 8192 &&
+	    std::isfinite(dpr) && dpr >= 0.1 && dpr <= 8;
+}
+
+static void preparePrerenderHost()
+{
+	NSString *fontsDir = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Fonts"];
+	gea::macos::registerCustomTtfDirectory(fontsDir);
+	gea::macos::useSoftwareTextMeasurement();
+	gea::platform::storage::setMountProvider(+[]() { return true; });
+}
+
+static bool loadPrerenderPage(int width, int height, double dpr)
+{
+	if (!gea_macos_prepare_prerender(width, height)) return false;
+	gea_macos_set_prerender_time(0);
+	// Seed the timer scheduler before app initialization schedules any timers.
+	gea::host::resetAnimationFrameCallbacks();
+	gea::host::resetScheduledTimers();
+	gea::host::runAnimationFrameCallbacks(0);
+	gea::framework::app::Application::init(width, height, dpr);
+	if (gea::embedded::ui::Tree::instance().mountedRoot() < 0) return false;
+	gea::css::DeclarativeAnimations::scanAndStart(0);
+	return true;
+}
+
+static void paintPrerenderFrame(int timeMs)
+{
+	@autoreleasepool {
+		gea_macos_set_prerender_time(timeMs);
+		gea::embedded::ui::StyleSheet::instance().startCssAnimations(timeMs);
+		gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(timeMs));
+		gea::framework::app::Application::frame(timeMs);
+	}
+}
+
+static void drawPrerenderFrames(int fps, int targetMs)
+{
+	for (std::int64_t frame = 0; ; ++frame) {
+		const auto tickMs = (frame * 1000 + fps / 2) / fps;
+		const int timeMs = static_cast<int>(std::min<std::int64_t>(tickMs, targetMs));
+		paintPrerenderFrame(timeMs);
+		if (timeMs == targetMs) break;
+	}
+}
+
 static int prerender(int argc, const char *argv[])
 {
-	if (argc != 8) return 2;
+	const bool video = std::strcmp(argv[1], "--gea-prerender-video") == 0;
+	if (argc != (video ? 9 : 8)) return 2;
 	const int width = std::atoi(argv[3]);
 	const int height = std::atoi(argv[4]);
 	const double dpr = std::atof(argv[5]);
 	const int fps = std::atoi(argv[6]);
 	const int targetMs = std::atoi(argv[7]);
-	if (width < 1 || width > 8192 || height < 1 || height > 8192 ||
-	    !std::isfinite(dpr) || dpr < 0.1 || dpr > 8 ||
-	    fps < 1 || fps > 1000 || targetMs < 0) return 2;
-	if (!gea_macos_prepare_prerender(width, height)) return 1;
-
-	NSString *fontsDir = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Fonts"];
-	gea::macos::registerCustomTtfDirectory(fontsDir);
-	gea::macos::useSoftwareTextMeasurement();
-	gea::platform::storage::setMountProvider(+[]() { return true; });
-
-	gea_macos_set_prerender_time(0);
-	// Seed the timer scheduler before app initialization schedules any timers.
-	gea::host::runAnimationFrameCallbacks(0);
-	gea::framework::app::Application::init(width, height, dpr);
-	auto &tree = gea::embedded::ui::Tree::instance();
-	if (tree.mountedRoot() < 0) {
-		std::fputs("Gea prerender requires a mounted UI tree\n", stderr);
-		return 1;
-	}
-	gea::css::DeclarativeAnimations::scanAndStart(0);
-
-	for (std::int64_t frame = 0; ; ++frame) {
-		const auto tickMs = (frame * 1000 + fps / 2) / fps;
-		const int timeMs = static_cast<int>(std::min<std::int64_t>(tickMs, targetMs));
-		@autoreleasepool {
-			gea_macos_set_prerender_time(timeMs);
-			gea::embedded::ui::StyleSheet::instance().startCssAnimations(timeMs);
-			gea::css::AnimationEngine::instance().tick(static_cast<std::uint32_t>(timeMs));
-			gea::framework::app::Application::frame(timeMs);
+	if (!validPrerenderViewport(width, height, dpr) || fps < 1 || fps > 1000 || targetMs < 0) return 2;
+	try {
+		if (video) {
+#if defined(GEA_MACOS_PRERENDER_VIDEO)
+			const int endMs = std::atoi(argv[8]);
+			if (endMs <= targetMs) return 2;
+			gea::platform::prerender::VideoFrames stream(width, height);
+			gea::platform::prerender::VideoClock clock(fps);
+			preparePrerenderHost();
+			if (!loadPrerenderPage(width, height, dpr)) throw std::runtime_error("Could not mount the page");
+			gea::platform::prerender::streamVideoFrames(stream, fps, targetMs, endMs, paintPrerenderFrame);
+			return 0;
+#else
+			throw std::runtime_error("The installed @geastack/core lacks native video export");
+#endif
 		}
-		if (timeMs == targetMs) break;
+		preparePrerenderHost();
+		if (!loadPrerenderPage(width, height, dpr)) {
+			std::fputs("Gea prerender could not mount the page\n", stderr);
+			return 1;
+		}
+		drawPrerenderFrames(fps, targetMs);
+	} catch (const std::exception &error) {
+		std::fprintf(stderr, "%s\n", error.what());
+		return 1;
 	}
 	if (!gea_macos_write_prerender_png([NSString stringWithUTF8String:argv[2]])) {
 		std::fprintf(stderr, "Could not write PNG to %s\n", argv[2]);
@@ -1285,11 +1336,102 @@ static int prerender(int argc, const char *argv[])
 	return 0;
 }
 
+static bool writePrerenderReply(FILE *stream, NSDictionary *reply)
+{
+	NSData *encoded = [NSJSONSerialization dataWithJSONObject:reply options:0 error:nil];
+	return encoded && std::fwrite(encoded.bytes, 1, encoded.length, stream) == encoded.length &&
+	    std::fputc('\n', stream) != EOF && std::fflush(stream) == 0;
+}
+
+static int prerenderWorker()
+{
+	// Reserve stdout for the request protocol. Engine diagnostics use stderr.
+	const int protocolFd = dup(STDOUT_FILENO);
+	if (protocolFd < 0) return 1;
+	FILE *protocol = fdopen(protocolFd, "w");
+	if (!protocol) {
+		close(protocolFd);
+		return 1;
+	}
+	if (dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+		std::fclose(protocol);
+		return 1;
+	}
+
+	preparePrerenderHost();
+	std::string mountedInput;
+	int mountedWidth = 0, mountedHeight = 0;
+	double mountedDpr = 0;
+	std::string line;
+	bool connected = true;
+	while (connected && std::getline(std::cin, line)) {
+		@autoreleasepool {
+			NSData *data = [NSData dataWithBytes:line.data() length:line.size()];
+			id decoded = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+			NSDictionary *request = [decoded isKindOfClass:NSDictionary.class] ? decoded : nil;
+			NSString *input = request[@"input"];
+			NSString *output = request[@"out"];
+			NSNumber *widthNumber = request[@"width"] ?: @480;
+			NSNumber *heightNumber = request[@"height"] ?: @220;
+			NSNumber *dprNumber = request[@"dpr"] ?: @1;
+			NSNumber *reuse = request[@"reusePage"] ?: @NO;
+			if (![input isKindOfClass:NSString.class] || input.length == 0 ||
+			    ![output isKindOfClass:NSString.class] || output.length == 0 ||
+			    ![widthNumber isKindOfClass:NSNumber.class] ||
+			    ![heightNumber isKindOfClass:NSNumber.class] ||
+			    ![dprNumber isKindOfClass:NSNumber.class] ||
+			    ![reuse isKindOfClass:NSNumber.class] ||
+			    widthNumber.doubleValue != widthNumber.intValue ||
+			    heightNumber.doubleValue != heightNumber.intValue ||
+			    !validPrerenderViewport(widthNumber.intValue, heightNumber.intValue, dprNumber.doubleValue)) {
+				connected = writePrerenderReply(protocol, @{@"ok": @NO, @"error": @"Invalid capture request"});
+				continue;
+			}
+
+			const int width = widthNumber.intValue, height = heightNumber.intValue;
+			const double dpr = dprNumber.doubleValue;
+			const bool reusePage = reuse.boolValue && mountedInput == input.UTF8String &&
+			    mountedWidth == width && mountedHeight == height && mountedDpr == dpr;
+			const auto started = std::chrono::steady_clock::now();
+			try {
+				if (!reusePage) {
+					mountedInput.clear();
+					if (setenv("GEA_PRERENDER_INPUT", input.fileSystemRepresentation, 1) != 0 ||
+					    !loadPrerenderPage(width, height, dpr)) {
+						connected = writePrerenderReply(protocol, @{@"ok": @NO, @"error": @"Could not mount the page"});
+						continue;
+					}
+					drawPrerenderFrames(60, 0);
+					mountedInput = input.UTF8String;
+					mountedWidth = width;
+					mountedHeight = height;
+					mountedDpr = dpr;
+				}
+				if (!gea_macos_write_prerender_png(output)) {
+					connected = writePrerenderReply(protocol, @{@"ok": @NO, @"error": @"Could not write the PNG"});
+					continue;
+				}
+				const double ms = std::chrono::duration<double, std::milli>(
+				    std::chrono::steady_clock::now() - started).count();
+				connected = writePrerenderReply(protocol, @{@"ok": @YES, @"ms": @(ms), @"reusedPage": @(reusePage)});
+			} catch (const std::exception &error) {
+				mountedInput.clear();
+				NSString *message = [NSString stringWithUTF8String:error.what()] ?: @"Capture failed";
+				connected = writePrerenderReply(protocol, @{@"ok": @NO, @"error": message});
+			}
+		}
+	}
+	std::fclose(protocol);
+	return connected ? 0 : 1;
+}
+
 int main(int argc, const char *argv[])
 {
 	GeaNativeTerminationGuard terminationGuard;
 	@autoreleasepool {
-		if (argc > 1 && std::strcmp(argv[1], "--gea-prerender") == 0) return prerender(argc, argv);
+		if (argc > 1 && (std::strcmp(argv[1], "--gea-prerender") == 0 ||
+		                 std::strcmp(argv[1], "--gea-prerender-video") == 0)) return prerender(argc, argv);
+		if (argc == 2 && std::strcmp(argv[1], "--gea-prerender-worker") == 0) return prerenderWorker();
 		gea_macos_smoke_log("[gea-macos] main entered");
 		const bool backgroundTest = gea::macos::background_test::enabled();
 		NSApplication *app = [NSApplication sharedApplication];
