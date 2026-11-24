@@ -30,9 +30,10 @@ const manifestPath = path.resolve(value('--manifest') || '')
 const configDir = value('--config-dir') ? path.resolve(value('--config-dir')) : ''
 const appDirs = values('--app-dir').map((item) => path.resolve(item))
 const sharedCssDirs = values('--shared-css-dir').map((item) => path.resolve(item))
+const moduleGraphs = values('--module-graph').map((item) => path.resolve(item))
 
 if (!value('--resources-dir') || !value('--manifest')) {
-  fail('usage: sync-resources.mjs --resources-dir <dir> --manifest <file> [--config-dir <dir>] [--app-dir <dir> ...] [--shared-css-dir <dir> ...]')
+  fail('usage: sync-resources.mjs --resources-dir <dir> --manifest <file> [--config-dir <dir>] [--app-dir <dir> ...] [--shared-css-dir <dir> ...] [--module-graph <gea-module-graph.json> ...]')
 }
 
 fs.mkdirSync(resourcesDir, { recursive: true })
@@ -71,6 +72,28 @@ function isSafeBasename(value) {
   return value !== '.' && value !== '..' && path.basename(value) === value && !value.includes('/') && !value.includes('\\')
 }
 
+// Every stylesheet the compiled app imports, from the module graph its build
+// wrote. This is the authority on which @font-face rules the app uses:
+// walking the app's own folder misses CSS reached through imports, such as a
+// workspace package of shared styles (import "../../shared").
+function moduleGraphCss(graphPath) {
+  let graph
+  try {
+    graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'))
+  } catch {
+    return []
+  }
+  const files = new Set()
+  for (const module of Array.isArray(graph?.modules) ? graph.modules : []) {
+    for (const id of [module?.file, module?.id, ...(Array.isArray(module?.imports) ? module.imports.map((item) => item?.resolvedId) : [])]) {
+      if (typeof id !== 'string') continue
+      const file = id.split(/[?#]/, 1)[0]
+      if (file.endsWith('.css') && fs.existsSync(file) && fs.statSync(file).isFile()) files.add(file)
+    }
+  }
+  return [...files]
+}
+
 function walkCss(root, visit) {
   if (!root || !fs.existsSync(root)) return
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
@@ -87,8 +110,7 @@ function walkCss(root, visit) {
 const desiredFonts = new Map()
 const desiredFontLicenses = new Map()
 const fontAliases = new Map()
-for (const root of [...appDirs, ...sharedCssDirs]) {
-  walkCss(root, (cssPath) => {
+function visitCss(cssPath) {
     const css = fs.readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
     const facePattern = /@font-face\s*\{([^}]+)\}/gi
     let face
@@ -119,8 +141,10 @@ for (const root of [...appDirs, ...sharedCssDirs]) {
         }
       }
     }
-  })
 }
+
+for (const graph of moduleGraphs) for (const cssPath of moduleGraphCss(graph)) visitCss(cssPath)
+for (const root of [...appDirs, ...sharedCssDirs]) walkCss(root, visitCss)
 
 let previousFonts = []
 try {

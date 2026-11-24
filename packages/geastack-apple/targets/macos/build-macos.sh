@@ -907,6 +907,10 @@ CXX_DEFINES=(
   # builds keep their baked atlas: the runtime path tries first, finds no
   # registered TTF bytes there, and falls through.
   -DGEA_EMBEDDED_TTF_RUNTIME_FONTS=1
+  # Runtime TTF slots cover the glyphs the generated font TU declares
+  # (runtimeTtfDeclaredCodepoints: the baseline plus the app's
+  # --gea-font-charset names), not just ASCII and two extras.
+  -DGEA_EMBEDDED_TTF_RUNTIME_DECLARED_GLYPHS=128
 )
 if [[ "${GEA_NATIVE_DEBUGGER:-0}" == "1" ]]; then
   [[ -f "${GEA_DEBUGGER_NATIVE_SOURCE:-}" ]] || { echo "GEA_DEBUGGER_NATIVE_SOURCE must name debugger/native/macos.mm" >&2; exit 2; }
@@ -1069,6 +1073,11 @@ if [[ ${#RESIDENT_IDS[@]} -eq 0 ]]; then
   # apple-native mode — generated app modules may be Objective-C++, this never is.
   if [[ "$THERMALRIGHT_DISPLAY_TARGET" == "1" && -f "$GENERATED_FONT_CPP" ]]; then
     CXX_SOURCES+=("$GENERATED_FONT_CPP")
+  elif [[ -f "$GENERATED_FONT_CPP" ]]; then
+    # The windowed build skips the font TU, so carry its declared glyph set
+    # (baseline + --gea-font-charset) to the runtime TTF slots on its own.
+    node "$ROOT_DIR/targets/macos/runtime-glyphs.mjs" --out "$GENERATED_DIR/gea_runtime_glyphs_generated.cpp" "$GENERATED_FONT_CPP"
+    CXX_SOURCES+=("$GENERATED_DIR/gea_runtime_glyphs_generated.cpp")
   fi
   [[ -f "$GENERATED_ASSETS_CPP" ]] && CXX_SOURCES+=("$GENERATED_ASSETS_CPP")
 else
@@ -1079,6 +1088,12 @@ else
   CXX_SOURCES+=("$RESIDENT_REGISTRY_CPP")
   for f in "${RESIDENT_GEATSC_SOURCES[@]}"; do CXX_SOURCES+=("$f"); done
   for f in "${RESIDENT_FONT_CPPS[@]}"; do CXX_SOURCES+=("$f"); done
+  # Resident font TUs prefix their symbols; the runtime TTF slots read the
+  # union of every resident's declared glyph set through the unprefixed hook.
+  if [[ ${#RESIDENT_FONT_CPPS[@]} -gt 0 ]]; then
+    node "$ROOT_DIR/targets/macos/runtime-glyphs.mjs" --out "$GENERATED_DIR/gea_runtime_glyphs_generated.cpp" "${RESIDENT_FONT_CPPS[@]}"
+    CXX_SOURCES+=("$GENERATED_DIR/gea_runtime_glyphs_generated.cpp")
+  fi
   for f in "${RESIDENT_ASSET_CPPS[@]}"; do CXX_SOURCES+=("$f"); done
   for f in "${RESIDENT_ENTRY_CPPS[@]}"; do CXX_SOURCES+=("$f"); done
 fi
@@ -2096,6 +2111,7 @@ else
   done
 fi
 for d in "${APP_DIRS_FOR_FONTS[@]}"; do
+  GEA_FONT_MODULE_GRAPH="$GENERATED_DIR/module-graph/gea-module-graph.json" \
   node -e "
     const fs = require('fs');
     const path = require('path');
@@ -2110,6 +2126,11 @@ for d in "${APP_DIRS_FOR_FONTS[@]}"; do
           if (entry.name === 'node_modules' || entry.name === 'dist') continue;
           walk(full);
         } else if (entry.isFile() && entry.name.endsWith('.css')) {
+          visit(full);
+        }
+      }
+    }
+    function visit(full) {
           const css = fs.readFileSync(full, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
           const re = /@font-face\s*\{([^}]+)\}/gi;
           let m;
@@ -2128,6 +2149,19 @@ for d in "${APP_DIRS_FOR_FONTS[@]}"; do
             fs.copyFileSync(resolved, dest);
             console.log('  copied font:', base);
           }
+    }
+    // CSS the app imports from workspace packages lives outside its own dir;
+    // the module graph names every stylesheet the bundle actually pulled in.
+    const graph = process.env.GEA_FONT_MODULE_GRAPH;
+    if (graph && fs.existsSync(graph)) {
+      const seen = new Set();
+      const modules = JSON.parse(fs.readFileSync(graph, 'utf8')).modules || [];
+      const list = Array.isArray(modules) ? modules : Object.values(modules);
+      for (const m of list) {
+        for (const p of [m.file, m.id, ...((m.imports || []).map((i) => i && i.resolvedId))]) {
+          if (typeof p !== 'string' || !p.endsWith('.css') || seen.has(p) || !fs.existsSync(p)) continue;
+          seen.add(p);
+          visit(p);
         }
       }
     }
@@ -2166,6 +2200,12 @@ else
   done
   for d in ${APP_DIRS_FOR_FONTS[@]+"${APP_DIRS_FOR_FONTS[@]}"}; do
     RESOURCE_SYNC_ARGS+=(--app-dir "$d")
+  done
+  # Stylesheets imported from workspace packages sit outside every app dir;
+  # the module graph lists each one the bundle pulled in.
+  for graph in "$GENERATED_DIR/module-graph/gea-module-graph.json" \
+    "$GENERATED_DIR"/residents/*/module-graph/gea-module-graph.json; do
+    [[ -f "$graph" ]] && RESOURCE_SYNC_ARGS+=(--module-graph "$graph")
   done
   RESOURCE_SYNC_RESULT="$(node "$ROOT_DIR/targets/macos/sync-resources.mjs" "${RESOURCE_SYNC_ARGS[@]}")"
   if [[ "$RESOURCE_SYNC_RESULT" == *'changed=1'* ]]; then BUNDLE_CONTENT_CHANGED=1; fi
