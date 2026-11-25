@@ -166,8 +166,23 @@ static NSFont *self_resolveFont(int fontId, int sizePx, int weight, int stretch)
 		const CGFloat nativeWeight = weight <= 400 ? (weight - 400) / 1000.0 : (weight - 400) / 800.0;
 		return [NSFont systemFontOfSize:size weight:nativeWeight];
 	}
-	NSDictionary *baseAttributes = @{ (__bridge NSString *)kCTFontFamilyNameAttribute: family };
-	CTFontDescriptorRef descriptor = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)baseAttributes);
+	FontBytes alias;
+	{
+		TtfByteRegistry &registry = ttfByteRegistry();
+		std::scoped_lock guard(registry.lock);
+		auto match = registry.byAlias.find(lower.UTF8String);
+		if (match != registry.byAlias.end()) alias = match->second;
+	}
+	CTFontDescriptorRef descriptor = nullptr;
+	if (alias) {
+		NSData *data = [NSData dataWithBytes:alias->data() length:alias->size()];
+		descriptor = CTFontManagerCreateFontDescriptorFromData((__bridge CFDataRef)data);
+	}
+	if (!descriptor) {
+		NSDictionary *baseAttributes = @{ (__bridge NSString *)kCTFontFamilyNameAttribute: family };
+		descriptor = CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)baseAttributes);
+		alias.reset();
+	}
 	CTFontRef base = CTFontCreateWithFontDescriptor(descriptor, size, nullptr);
 	CFRelease(descriptor);
 	if (!base) return [NSFont systemFontOfSize:size];
@@ -185,6 +200,9 @@ static NSFont *self_resolveFont(int fontId, int sizePx, int weight, int stretch)
 		}
 		CFRelease(axes);
 	}
+	// A static @font-face names an exact face. A weight lookup by family
+	// could substitute a different file from the same installed family.
+	if (alias && variation.count == 0) return (__bridge_transfer NSFont *)base;
 	NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
 	if (variation.count) attributes[(__bridge NSString *)kCTFontVariationAttribute] = variation;
 	else attributes[(__bridge NSString *)kCTFontTraitsAttribute] = @{

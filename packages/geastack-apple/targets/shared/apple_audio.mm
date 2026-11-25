@@ -11,7 +11,8 @@
 //     │                        is rendered here, sample-accurately scheduled and
 //     │                        mixed against every other live note.
 //     ├─ AVAudioPlayerNode  ── AudioSystem::playFile
-//     └─ AVAudioPlayerNode  ── AudioSystem::playPcm
+//     ├─ AVAudioPlayerNode  ── AudioSystem::playPcm
+//     └─ AVAudioPlayerNode  ── continuous PCM streams (including AudioWorklets)
 //                     └─ mainMixerNode ─ outputNode
 //
 // Timebase
@@ -63,18 +64,22 @@
 #include <TargetConditionals.h>
 
 #include "audio.h"
+#include "audio_stream.h"
 
 #include "apple_audio_testing.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -422,6 +427,7 @@ public:
 		@try {
 			if (filePlayer_ != nil) filePlayer_.volume = linear;
 			if (pcmPlayer_ != nil) pcmPlayer_.volume = linear;
+			if (streamPlayer_ != nil) streamPlayer_.volume = linear;
 		} @catch (NSException *exception) {
 			(void)exception;
 		}
@@ -494,9 +500,51 @@ public:
 		}
 	}
 
-	void stopPlayback()
+	std::uint64_t playPcmStream(PcmStreamMixer::Pull pull)
+	{
+		if (!pull) return 0;
+		ensureSetup();
+		{
+			std::lock_guard<std::mutex> guard(graphMutex_);
+			@try {
+				if (streamFormat_ == nil) {
+					streamFormat_ = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+					                                                sampleRate:deviceSampleRate
+					                                                  channels:2
+					                                               interleaved:NO];
+				}
+				if (!ensurePlayerLocked(streamPlayer_, streamPlayerFormat_, streamFormat_)) return 0;
+			} @catch (NSException *exception) {
+				(void)exception;
+				return 0;
+			}
+		}
+		const auto stream = [&] {
+			std::lock_guard<std::mutex> guard(streamWakeMutex_);
+			return streams_.add(std::move(pull));
+		}();
+		streamWake_.notify_one();
+		std::call_once(streamWorker_, [this] {
+			std::thread([this] { feedPcmStreams(); }).detach();
+		});
+		return stream;
+	}
+
+	void stopPcmStream(std::uint64_t stream) { streams_.remove(stream); }
+	bool pcmStreamSettled(std::uint64_t stream) const { return streams_.settled(stream); }
+
+	void flushPlayback()
 	{
 		std::lock_guard<std::mutex> guard(graphMutex_);
+		flushStreamBuffersLocked();
+	}
+
+	void stopPlayback()
+	{
+		std::lock_guard<std::mutex> streamsGuard(streamWakeMutex_);
+		streams_.clear();
+		std::lock_guard<std::mutex> guard(graphMutex_);
+		flushStreamBuffersLocked();
 		@try {
 			if (filePlayer_ != nil) [filePlayer_ stop];
 			if (pcmPlayer_ != nil) [pcmPlayer_ stop];
@@ -608,6 +656,83 @@ public:
 
 private:
 	Engine() = default;
+
+	// Pull callbacks may take locks. Feed the player on a worker and leave
+	// the CoreAudio render callback free of application code.
+	void feedPcmStreams()
+	{
+		while (true) {
+			{
+				std::unique_lock<std::mutex> lock(streamWakeMutex_);
+				streamWake_.wait(lock, [this] { return streams_.active(); });
+			}
+			@autoreleasepool {
+				queuePcmStreamBuffer();
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(4));
+		}
+	}
+
+	void flushStreamBuffersLocked()
+	{
+		// Completion callbacks can arrive after stop. Retire their counter
+		// along with the queued buffers so it cannot affect the next queue.
+		queuedStreamBuffers_ = std::make_shared<std::atomic<int>>(0);
+		@try {
+			if (streamPlayer_ != nil) [streamPlayer_ stop];
+		} @catch (NSException *exception) {
+			(void)exception;
+		}
+	}
+
+	void queuePcmStreamBuffer()
+	{
+		std::shared_ptr<std::atomic<int>> queued;
+		{
+			std::lock_guard<std::mutex> guard(graphMutex_);
+			queued = queuedStreamBuffers_;
+			if (queued->load(std::memory_order_relaxed) >= 2) return;
+		}
+		std::array<std::int16_t, PcmStreamMixer::chunkFrames * 2> samples{};
+		const auto frames = streams_.mix(samples.data(), PcmStreamMixer::chunkFrames);
+		if (frames == 0) return;
+
+		std::lock_guard<std::mutex> guard(graphMutex_);
+		if (queued != queuedStreamBuffers_) {
+			streams_.didWrite(true);
+			return;
+		}
+		bool submitted = false;
+		@try {
+			if (ensurePlayerLocked(streamPlayer_, streamPlayerFormat_, streamFormat_)) {
+				const auto count = static_cast<AVAudioFrameCount>(frames);
+				AVAudioPCMBuffer *buffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:streamFormat_
+				                                                       frameCapacity:count];
+				if (buffer != nil) {
+					buffer.frameLength = count;
+					float *const *channels = buffer.floatChannelData;
+					for (std::size_t frame = 0; frame < frames; ++frame) {
+						channels[0][frame] = static_cast<float>(samples[2 * frame]) / 32768.0f;
+						channels[1][frame] = static_cast<float>(samples[2 * frame + 1]) / 32768.0f;
+					}
+					queued->fetch_add(1, std::memory_order_relaxed);
+					@try {
+						[streamPlayer_ scheduleBuffer:buffer completionCallbackType:AVAudioPlayerNodeCompletionDataRendered
+						             completionHandler:^(AVAudioPlayerNodeCompletionCallbackType) {
+						                 queued->fetch_sub(1, std::memory_order_relaxed);
+						             }];
+						submitted = true;
+					} @finally {
+						if (!submitted) queued->fetch_sub(1, std::memory_order_relaxed);
+					}
+					if (!streamPlayer_.isPlaying) [streamPlayer_ play];
+				}
+			}
+		} @catch (NSException *exception) {
+			(void)exception;
+		}
+		streams_.didWrite(submitted);
+	}
 
 	// ---- records ------------------------------------------------------------
 	OscillatorRecord *find(std::uint64_t handle)
@@ -1084,6 +1209,14 @@ private:
 	AVAudioFormat *filePlayerFormat_ = nil;
 	AVAudioPlayerNode *pcmPlayer_ = nil;
 	AVAudioFormat *pcmPlayerFormat_ = nil;
+	PcmStreamMixer streams_;
+	std::mutex streamWakeMutex_;
+	std::condition_variable streamWake_;
+	std::once_flag streamWorker_;
+	std::shared_ptr<std::atomic<int>> queuedStreamBuffers_ = std::make_shared<std::atomic<int>>(0);
+	AVAudioPlayerNode *streamPlayer_ = nil;
+	AVAudioFormat *streamPlayerFormat_ = nil;
+	AVAudioFormat *streamFormat_ = nil;
 	id configurationObserver_ = nil;
 	id interruptionObserver_ = nil;
 };
@@ -1175,9 +1308,15 @@ bool AudioSystem::playPcm(const std::int16_t *samples, std::size_t sample_count,
 }
 
 void AudioSystem::stopPlayback() { Engine::instance().stopPlayback(); }
-// No PCM stream output is queued by this backend (only the ESP32 runtime
-// streams PCM), so a flush has nothing to discard.
-void AudioSystem::flushPlayback() {}
+void AudioSystem::flushPlayback() { Engine::instance().flushPlayback(); }
+
+std::uint64_t AudioSystem::playPcmStream(PcmStreamMixer::Pull pull)
+{
+	return Engine::instance().playPcmStream(std::move(pull));
+}
+
+void AudioSystem::stopPcmStream(std::uint64_t stream) { Engine::instance().stopPcmStream(stream); }
+bool AudioSystem::pcmStreamSettled(std::uint64_t stream) { return Engine::instance().pcmStreamSettled(stream); }
 
 namespace testing {
 
