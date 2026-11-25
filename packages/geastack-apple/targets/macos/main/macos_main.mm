@@ -355,6 +355,20 @@ static bool geaOwnsContourPress(int x, int y) {
 }
 @end
 
+static void installStorageProviders()
+{
+	gea::platform::storage::setMountProvider(+[]() { return true; });
+	gea::platform::storage::setReadPathProvider(+[](const std::string &path) -> std::string {
+		if (!path.starts_with("/sdcard/")) return path;
+		NSString *relative = [NSString stringWithUTF8String:path.c_str() + 1];
+		if (relative == nil || [relative.pathComponents containsObject:@".."]) return path;
+		NSString *resource = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:relative];
+		if (resource != nil && [NSFileManager.defaultManager isReadableFileAtPath:resource])
+			return resource.fileSystemRepresentation;
+		return path;
+	});
+}
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) GeaContentView *rootView;
@@ -446,7 +460,7 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	// macOS has an available host filesystem before app initialization.
 	// ImageService gates external reads on this provider just as device targets
 	// gate theirs on mounted storage.
-	gea::platform::storage::setMountProvider(+[]() { return true; });
+	installStorageProviders();
 	const bool thermalrightTarget = gea::macos::thermalright::enabled();
 	if (!thermalrightTarget) [self installMainMenu];
 
@@ -1257,7 +1271,7 @@ static void preparePrerenderHost()
 	NSString *fontsDir = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Fonts"];
 	gea::macos::registerCustomTtfDirectory(fontsDir);
 	gea::macos::useSoftwareTextMeasurement();
-	gea::platform::storage::setMountProvider(+[]() { return true; });
+	installStorageProviders();
 }
 
 static bool loadPrerenderPage(int width, int height, double dpr)
