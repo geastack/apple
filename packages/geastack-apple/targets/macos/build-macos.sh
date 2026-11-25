@@ -895,6 +895,8 @@ if [[ ${#RESIDENT_IDS[@]} -eq 0 ]]; then
 fi
 
 CXX_DEFINES=(
+  # Workers and AudioWorklets run in their own runtime realms on macOS.
+  -DGEA_RUNTIME_REALMS=1
   -DGEA_EMBEDDED_ENABLE_VIRTUAL_KEYBOARD=0
   # Desktop screens exceed the embedded default of 512 nodes. Apply the
   # capacity consistently to generated app code and every framework TU.
@@ -1160,6 +1162,13 @@ fi
 
 OBJ_FILES=()
 
+# Resolve the compiler and SDK together through the selected Xcode. PATH may
+# contain a toolchain shim whose Clang cannot consume the selected SDK headers.
+MACOS_CLANG="$(xcrun --sdk macosx --find clang)"
+MACOS_CLANGXX="$(xcrun --sdk macosx --find clang++)"
+SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export SDKROOT
+
 CCACHE_PREFIX=()
 if [[ "${GEA_MACOS_CCACHE:-1}" != "0" ]]; then
   if command -v sccache >/dev/null 2>&1; then
@@ -1171,8 +1180,8 @@ fi
 # macOS still ships Bash 3.2, where expanding an explicitly empty array under
 # `set -u` raises "unbound variable".  Keep the cache prefix genuinely
 # optional so GEA_MACOS_CCACHE=0 can exercise an authoritative cold build.
-CLANG_CMD=(${CCACHE_PREFIX[@]+"${CCACHE_PREFIX[@]}"} clang)
-CLANGXX_CMD=(${CCACHE_PREFIX[@]+"${CCACHE_PREFIX[@]}"} clang++)
+CLANG_CMD=(${CCACHE_PREFIX[@]+"${CCACHE_PREFIX[@]}"} "$MACOS_CLANG")
+CLANGXX_CMD=(${CCACHE_PREFIX[@]+"${CCACHE_PREFIX[@]}"} "$MACOS_CLANGXX")
 MACOS_COMPILER_VERSION="$("${CLANGXX_CMD[@]}" --version 2>/dev/null | head -n 1 || true)"
 
 # Mangle a source path into a unique object filename. Return through a global
@@ -1201,7 +1210,7 @@ compile_signature() {
     printf '%s ' "${CLANG_CMD[@]}"
     printf '\nclangxx='
     printf '%s ' "${CLANGXX_CMD[@]}"
-    printf '\ncompiler-version=%s\n' "$MACOS_COMPILER_VERSION"
+    printf '\ncompiler-version=%s\nsdk=%s\n' "$MACOS_COMPILER_VERSION" "$SDKROOT"
     printf 'defines='
     printf '%s ' "${CXX_DEFINES[@]}"
     printf '\nincludes='
@@ -2027,7 +2036,7 @@ LINK_OUTPUT_TMP="$LINK_OUTPUT.tmp.$$"
 LINK_SIGNATURE_FILE="$BUILD_DIR/link.sig"
 LINK_SIGNATURE_TMP="$LINK_SIGNATURE_FILE.tmp.$$"
 {
-  printf 'compiler=%s\n' "$MACOS_COMPILER_VERSION"
+  printf 'compiler=%s\nsdk=%s\n' "$MACOS_COMPILER_VERSION" "$SDKROOT"
   printf 'opt=%s\n' "$GEA_MACOS_OPT_LEVEL"
   printf 'debug=%s\n' "${GEA_MACOS_DEBUG_INFO:-}"
   printf 'link=%s\n' "${MACOS_LINK_FLAGS[@]}"
@@ -2056,7 +2065,7 @@ if (( LINK_NEEDED != 0 )); then
   # address-taken ones included, and the runtime tells callables apart by
   # entry address (CallableObject::callWithReceiver finds a method's receiver
   # check by it), so a folded method template ran its twin's check.
-  macos_run_tracked_child clang++ -std=c++20 -ObjC++ -fobjc-arc "$GEA_MACOS_OPT_LEVEL" ${GEA_MACOS_DEBUG_INFO} \
+  macos_run_tracked_child "$MACOS_CLANGXX" -std=c++20 -ObjC++ -fobjc-arc "$GEA_MACOS_OPT_LEVEL" ${GEA_MACOS_DEBUG_INFO} \
     "${MACOS_LINK_FLAGS[@]}" \
     "${LINK_FRAMEWORKS[@]}" \
     "${OBJ_FILES[@]}" \
