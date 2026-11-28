@@ -1,43 +1,79 @@
 #import <AppKit/AppKit.h>
 
-#include "apps.h"
+#include "geaos.h"
 
 #include <string>
+#include <vector>
 
-// macOS app-launcher platform. When the JSX-level `Apps.launch('foo')` runs,
-// AppManager::launch routes through this platform. We don't have in-process
-// app swapping yet (that'd need every app's __gea_top_level bundled into one
-// binary with a registry — like ESP32's resident-app system), so we cheat:
-// find dist/<id>/*.app next to the currently running bundle, open it with
-// NSWorkspace, and terminate self. Result is "click a tile → next app's
-// window appears, launcher window goes away" — same UX as the watch, just
-// realized via separate Mac processes.
+// The macOS GeaOS host. Apps on macOS are bundled with the shell: the ones
+// built next to this one (dist/<id>/<Name>.app) are its bundledApps(), and
+// launching one opens that bundle and quits this process -- "click a tile,
+// the app's window appears, Home's goes away", like the watch, realized as
+// separate Mac processes. Apps are never downloaded and loaded at run time
+// on Apple targets.
 //
-// If the target .app hasn't been built yet, we log a message and stay in
-// the launcher. The user runs `targets/macos/build-macos.sh <id>` first.
+// An app that has not been built yet is not listed; build it with
+// `gea build --target macos <id>`.
 
 namespace {
 
-class MacosAppLauncherPlatform final : public gea::framework::apps::AppLauncherPlatform {
-public:
-	explicit MacosAppLauncherPlatform(std::string currentId) : currentId_(std::move(currentId)) {}
+// The bundle that plays Home.
+constexpr const char *kHomeAppId = "app-launcher";
 
-	const char *currentInstalledAppId() override { return currentId_.c_str(); }
-	bool runningAppIsLauncher(const char *launcherAppId) override
+class MacosAppHost final : public gea::geaos::AppHost {
+public:
+	explicit MacosAppHost(std::string currentId) : currentId_(std::move(currentId)) {}
+
+	const char *targetKey() const override { return "macos"; }
+	// Bundled apps are built with this shell; there is nothing to mismatch.
+	const char *abi() const override { return "macos-bundled"; }
+	const char *firmwareId() const override { return currentId_.c_str(); }
+	const char *runningAppId() const override { return currentId_ == kHomeAppId ? "" : currentId_.c_str(); }
+
+	std::vector<gea::geaos::InstalledApp> bundledApps() const override
 	{
-		if (!launcherAppId) return false;
-		return currentId_ == launcherAppId;
+		std::vector<gea::geaos::InstalledApp> apps;
+		NSString *dist = distDirectory();
+		NSArray<NSString *> *ids = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dist error:nil];
+		for (NSString *candidate in ids) {
+			const char *id = candidate.UTF8String;
+			if (!gea::geaos::isValidAppId(id) || std::string(id) == kHomeAppId) continue;
+			NSString *bundle = findBundleForAppId(candidate);
+			if (!bundle) continue;
+			gea::geaos::InstalledApp app;
+			app.manifest.id = id;
+			NSString *name = [[bundle lastPathComponent] stringByDeletingPathExtension];
+			app.manifest.name = name.length ? name.UTF8String : id;
+			app.manifest.abi = abi();
+			app.volumeId = "bundle";
+			app.location = bundle.UTF8String;
+			apps.push_back(std::move(app));
+		}
+		return apps;
 	}
 
-	bool launchInstalledApp(const char *appId) override
+	bool launch(const gea::geaos::InstalledApp &app, std::string &error) override
 	{
-		if (!appId || !appId[0]) return false;
+		return open(app.manifest.id.c_str(), error);
+	}
+
+	bool home(std::string &error) override
+	{
+		if (currentId_ == kHomeAppId) {
+			error = "Home is already running";
+			return false;
+		}
+		return open(kHomeAppId, error);
+	}
+
+private:
+	bool open(const char *appId, std::string &error)
+	{
 		NSString *target = [NSString stringWithUTF8String:appId];
 		NSString *bundle = findBundleForAppId(target);
 		if (!bundle) {
-			NSLog(@"[gea-launch] no built .app for '%@' under dist/. Run "
-			      @"targets/macos/build-macos.sh %@ first.",
-			      target, target);
+			NSLog(@"[gea-launch] no built .app for '%@' under dist/. Run gea build --target macos %@ first.", target, target);
+			error = std::string("no built app for ") + appId;
 			return false;
 		}
 		NSURL *url = [NSURL fileURLWithPath:bundle];
@@ -48,7 +84,11 @@ public:
 		                                      configuration:cfg
 		                                  completionHandler:^(NSRunningApplication *app, NSError *err) {
 			(void)app;
-			if (err) NSLog(@"[gea-launch] open failed: %@", err);
+			if (err) {
+				NSLog(@"[gea-launch] open failed: %@", err);
+				gea::geaos::Launcher::setLastError(err.localizedDescription.UTF8String);
+				return;
+			}
 			dispatch_async(dispatch_get_main_queue(), ^{
 				[NSApp terminate:nil];
 			});
@@ -56,19 +96,22 @@ public:
 		return true;
 	}
 
+	// Default bundle: .../dist/<currentId>/<Name>.app. Tagged builds use
+	// .../dist/.namespaces/<tag>/<currentId>/<Name>.app. In both layouts two
+	// parent traversals land on the folder whose children are app ids, so a
+	// tagged Home opens apps built in the same output namespace.
+	static NSString *distDirectory()
+	{
+		NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+		return [[bundlePath stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
+	}
+
 private:
 	std::string currentId_;
 
 	static NSString *findBundleForAppId(NSString *appId)
 	{
-		// Default bundle: .../dist/<currentId>/<Name>.app. Tagged builds use
-		// .../dist/.namespaces/<tag>/<currentId>/<Name>.app. In both layouts,
-		// two parent traversals land on the root whose children are app ids, so a
-		// tagged launcher opens apps built in the same output namespace.
-		NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-		NSString *distDir = [[bundlePath stringByDeletingLastPathComponent]
-		    stringByDeletingLastPathComponent];
-		NSString *appDir = [distDir stringByAppendingPathComponent:appId];
+		NSString *appDir = [distDirectory() stringByAppendingPathComponent:appId];
 		NSError *err = nil;
 		NSArray<NSString *> *entries =
 		    [[NSFileManager defaultManager] contentsOfDirectoryAtPath:appDir error:&err];
@@ -86,10 +129,10 @@ namespace gea::macos {
 
 void installAppLauncherPlatform(const char *currentAppId)
 {
-	static MacosAppLauncherPlatform *instance = nullptr;
+	static MacosAppHost *instance = nullptr;
 	if (instance) return;
-	instance = new MacosAppLauncherPlatform(currentAppId ? currentAppId : "");
-	gea::framework::apps::AppManager::setPlatform(instance);
+	instance = new MacosAppHost(currentAppId ? currentAppId : "");
+	gea::geaos::Launcher::setHost(instance);
 }
 
 }  // namespace gea::macos

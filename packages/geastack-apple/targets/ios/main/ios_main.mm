@@ -8,7 +8,6 @@
 #endif
 
 #include "app.h"
-#include "apps.h"
 #include "canvas.h"
 #include "css/animation.h"
 #include "css/declarative.h"

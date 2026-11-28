@@ -470,7 +470,7 @@ static __weak AppDelegate *gGeaAppDelegate = nil;
 	NSString *fontsDir = [[[NSBundle mainBundle] resourcePath] stringByAppendingPathComponent:@"Fonts"];
 	gea::macos::registerCustomTtfDirectory(fontsDir);
 
-	// Wire the AppManager platform so JSX-level Apps.launch('foo') opens
+	// Register the GeaOS host so JSX-level Apps.launch('foo') opens
 	// dist/foo/Foo.app and terminates this process. Derive the current app
 	// id from CFBundleIdentifier (set by Info.plist.in to com.gea.<id>).
 	NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
@@ -1389,12 +1389,16 @@ static int prerenderWorker()
 			NSNumber *heightNumber = request[@"height"] ?: @220;
 			NSNumber *dprNumber = request[@"dpr"] ?: @1;
 			NSNumber *reuse = request[@"reusePage"] ?: @NO;
+			NSString *selector = request[@"selector"] ?: @"";
+			NSNumber *transparent = request[@"transparent"] ?: @NO;
 			if (![input isKindOfClass:NSString.class] || input.length == 0 ||
 			    ![output isKindOfClass:NSString.class] || output.length == 0 ||
 			    ![widthNumber isKindOfClass:NSNumber.class] ||
 			    ![heightNumber isKindOfClass:NSNumber.class] ||
 			    ![dprNumber isKindOfClass:NSNumber.class] ||
 			    ![reuse isKindOfClass:NSNumber.class] ||
+			    ![selector isKindOfClass:NSString.class] ||
+			    ![transparent isKindOfClass:NSNumber.class] ||
 			    widthNumber.doubleValue != widthNumber.intValue ||
 			    heightNumber.doubleValue != heightNumber.intValue ||
 			    !validPrerenderViewport(widthNumber.intValue, heightNumber.intValue, dprNumber.doubleValue)) {
@@ -1404,7 +1408,8 @@ static int prerenderWorker()
 
 			const int width = widthNumber.intValue, height = heightNumber.intValue;
 			const double dpr = dprNumber.doubleValue;
-			const bool reusePage = reuse.boolValue && mountedInput == input.UTF8String &&
+			const bool isolated = selector.length != 0 || transparent.boolValue;
+			const bool reusePage = reuse.boolValue && !isolated && mountedInput == input.UTF8String &&
 			    mountedWidth == width && mountedHeight == height && mountedDpr == dpr;
 			const auto started = std::chrono::steady_clock::now();
 			try {
@@ -1421,10 +1426,12 @@ static int prerenderWorker()
 					mountedHeight = height;
 					mountedDpr = dpr;
 				}
-				if (!gea_macos_write_prerender_png(output)) {
+				if (!gea_macos_write_prerender_png(output, selector.UTF8String, transparent.boolValue)) {
+					mountedInput.clear();
 					connected = writePrerenderReply(protocol, @{@"ok": @NO, @"error": @"Could not write the PNG"});
 					continue;
 				}
+				if (isolated) mountedInput.clear();
 				const double ms = std::chrono::duration<double, std::milli>(
 				    std::chrono::steady_clock::now() - started).count();
 				connected = writePrerenderReply(protocol, @{@"ok": @YES, @"ms": @(ms), @"reusedPage": @(reusePage)});

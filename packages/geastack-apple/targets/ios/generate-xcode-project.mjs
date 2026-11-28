@@ -210,6 +210,11 @@ const sources = [
   // gea::platform::audio — the AVAudioEngine backend, shared verbatim with macOS.
   source(path.join(iosDir, '../shared/apple_audio.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_sensors.mm'), 'sourcecode.cpp.objcpp'),
+  ...(!tvos ? [
+    source(path.join(iosDir, 'main/ios_http.mm'), 'sourcecode.cpp.objcpp'),
+    source(path.join(iosDir, 'main/ios_microphone.mm'), 'sourcecode.cpp.objcpp'),
+    source(path.join(iosDir, 'main/ios_websocket.mm'), 'sourcecode.cpp.objcpp'),
+  ] : []),
   source(path.join(iosDir, 'main/ios_camera.mm'), 'sourcecode.cpp.objcpp'),
   source(path.join(iosDir, 'main/ios_apps.c'), 'sourcecode.c.c'),
   ...appNativeSources,
@@ -262,7 +267,7 @@ const frameworks = [
   'Photos.framework',
   'Security.framework',
   'UserNotifications.framework',
-  ...(!tvos ? ['EventKit.framework'] : []),
+  ...(!tvos ? ['EventKit.framework', 'Network.framework', 'CFNetwork.framework'] : []),
   'Metal.framework',
   'MetalKit.framework',
   'Foundation.framework',
@@ -354,6 +359,7 @@ const includePaths = [
   // Framework include roots (core/host/engine includes + vendor/stb + AnimatedGIF)
   // from the shared manifest gea_sources.sh, passed by build-ios.sh via env.
   ...(process.env.GEA_FW_INCLUDE_DIRS || '').split('\n').filter(Boolean),
+  ...(!tvos && process.env.GEA_HOST_DIR ? [process.env.GEA_HOST_DIR] : []),
 ]
 
 // OTHER_LDFLAGS -no_deduplicate: ld64 folds functions with identical code by

@@ -5,6 +5,7 @@
 #include "canvas.h"
 #include "host/display_orientation.h"
 #include "pixel.h"
+#include "platform/prerender_capture.h"
 #include "thermalright_hid_display.h"
 
 #include <algorithm>
@@ -91,22 +92,27 @@ bool gea_macos_prepare_prerender(int width, int height)
 	return true;
 }
 
-bool gea_macos_write_prerender_png(NSString *path)
+bool gea_macos_write_prerender_png(NSString *path, const std::string &selector, bool transparent)
 {
+	const auto region = gea::platform::prerender::prepareCaptureRegion(
+	    g_canvas_w, g_canvas_h, selector, transparent);
+	const int channels = transparent ? 4 : 3;
 	NSBitmapImageRep *image = [[NSBitmapImageRep alloc]
-		initWithBitmapDataPlanes:nullptr pixelsWide:g_canvas_w pixelsHigh:g_canvas_h
-		bitsPerSample:8 samplesPerPixel:3 hasAlpha:NO isPlanar:NO
-		colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+		initWithBitmapDataPlanes:nullptr pixelsWide:region.width pixelsHigh:region.height
+		bitsPerSample:8 samplesPerPixel:channels hasAlpha:transparent isPlanar:NO
+		colorSpaceName:NSDeviceRGBColorSpace bitmapFormat:transparent ? NSBitmapFormatAlphaNonpremultiplied : 0
+		bytesPerRow:0 bitsPerPixel:0];
 	if (!image) return false;
-	for (int y = 0; y < g_canvas_h; ++y) {
+	for (int y = 0; y < region.height; ++y) {
 		auto *row = image.bitmapData + y * image.bytesPerRow;
-		for (int x = 0; x < g_canvas_w; ++x) {
+		for (int x = 0; x < region.width; ++x) {
 			int r, g, b, a;
 			gea::framework::graphics::pixel::unpackNative8(
-				g_framebuffer[static_cast<size_t>(y) * g_canvas_w + x], &r, &g, &b, &a);
-			row[x * 3] = r;
-			row[x * 3 + 1] = g;
-			row[x * 3 + 2] = b;
+				g_framebuffer[static_cast<size_t>(y + region.y) * g_canvas_w + x + region.x], &r, &g, &b, &a);
+			row[x * channels] = r;
+			row[x * channels + 1] = g;
+			row[x * channels + 2] = b;
+			if (transparent) row[x * channels + 3] = a;
 		}
 	}
 	NSData *png = [image representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
