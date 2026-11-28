@@ -18,7 +18,7 @@ assert.match(script, /source "\$ROOT_DIR\/targets\/macos\/build-child-lifecycle\
 assert.match(script, /macos_run_tracked_child node "\$GEA_CORE\/scripts\/build-gea-vite-geatsc\.mjs"/)
 assert.match(script, /macos_run_tracked_child ninja -C "\$BUILD_DIR"/)
 assert.match(script, /macos_run_tracked_child "\$\{CLANGXX_CMD\[@\]\}"[^]*-x c\+\+-header/)
-assert.match(script, /macos_run_tracked_child clang\+\+[^]*"\$LINK_OUTPUT_TMP"/)
+assert.match(script, /macos_run_tracked_child "\$MACOS_CLANGXX"[^]*"\$LINK_OUTPUT_TMP"/)
 
 const globalAcquire = script.indexOf('gea_acquire_heavy_build_lock "$HEAVY_BUILD_LOCK_PATH" macos "$MACOS_BUILD_LABEL"')
 const localAcquire = script.indexOf('\nacquire_build_lock\n', globalAcquire)

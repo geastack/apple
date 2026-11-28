@@ -32,7 +32,7 @@ assert.match(script, /jobs > logical[^]*jobs="\$logical"/, 'automatic jobs shoul
 assert.match(script, /GEA_MACOS_TIMINGS:-0/, 'phase timings should be opt-in')
 assert.match(
   script,
-  /CLANG_CMD=\(\$\{CCACHE_PREFIX\[@\]\+"\$\{CCACHE_PREFIX\[@\]\}"\} clang\)/,
+  /CLANG_CMD=\(\$\{CCACHE_PREFIX\[@\]\+"\$\{CCACHE_PREFIX\[@\]\}"\} "\$MACOS_CLANG"\)/,
   'disabling ccache must keep the optional prefix safe under macOS Bash 3.2 set -u',
 )
 assert.match(script, /timing_mark generation[^]*timing_mark source-graph[^]*timing_mark pch[^]*timing_mark compile[^]*timing_mark link[^]*timing_mark resources[^]*timing_mark codesign/)
